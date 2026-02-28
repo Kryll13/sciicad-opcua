@@ -1,2 +1,2 @@
-# sciicad-opcua
+# OPCUA for SCIICAD project
 
