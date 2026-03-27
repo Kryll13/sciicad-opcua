@@ -1,0 +1,70 @@
+# Configuration du serveur Global Discovery Server OPC-UA
+
+server:
+  # Point d'entrée du serveur OPC-UA
+  endpoint: opc.tcp://localhost:4840/GlobalDiscoveryServer
+  
+  # Informations de l'application
+  application_name: Global Discovery Server
+  application_uri: urn:localhost:GlobalDiscoveryServer
+  product_uri: urn:OPC Foundation:GlobalDiscoveryServer
+  
+  # Limites de connexion
+  max_connections: 100
+  timeout: 60  # secondes
+  
+  # Mode debug
+  debug: false
+
+database:
+  # Type de base de données: sqlite, postgresql, mysql
+  type: sqlite
+  
+  # URL de connexion (override les paramètres ci-dessous)
+  url: sqlite:///gds.db
+  
+  # Paramètres de connexion
+  host: localhost
+  port: 5432
+  database: gds
+  user: gds_user
+  password: gds_password
+
+security:
+  # Chemin de stockage des certificats
+  # Si non défini: ~/.opc-foundation/certificate-stores
+  cert_store_path: null
+  
+  # Taille des clés RSA
+  key_size: 2048
+  
+  # Validité des certificats (jours)
+  certificate_validity_days: 365
+  
+  # Exiger l'authentification
+  require_authentication: true
+  
+  # Durée de validité des sessions (heures)
+  session_timeout_hours: 24
+  
+  # Politique de mot de passe
+  password_min_length: 8
+  password_require_uppercase: true
+  password_require_numbers: true
+  password_require_special: false
+
+logging:
+  # Niveau de log: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+  
+  # Format des logs
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+  
+  # Fichier de log (null = console seulement)
+  file: null
+  
+  # Rotation des fichiers de log
+  file_rotation: "500 MB"
+  
+  # Nombre de fichiers de log à conserver
+  file_retention: 10
