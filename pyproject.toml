@@ -1,0 +1,14 @@
+[project]
+name = "sciicad-opcua"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "asyncua>=1.1.8",
+    "cryptography>=46.0.6",
+    "loguru>=0.7.3",
+    "pydantic>=2.12.5",
+    "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0.48",
+]
