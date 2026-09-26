@@ -108,6 +108,58 @@ Espace d'adressage publié :
 
 ---
 
+## 4. Le GDS — serveur de découverte global
+
+```bash
+uv run python -m gds --bind 0.0.0.0 --advertise <hôte> --database gds.db
+```
+
+Le GDS implémente les mêmes services de découverte que le LDS. Il n'en diffère
+que par la portée du registre :
+
+| Portée   | Expiration | Renouvellement | Registre restauré |
+|----------|------------|----------------|-------------------|
+| `local`  | 300 s      | imposé (~60 s) | soumis au TTL   |
+| `global` | **aucune** | **non imposé** | **fait foi**     |
+
+Un serveur inscrit auprès d'un GDS n'a donc **pas** à se réenregistrer : son
+inscription vaut jusqu'à son retrait explicite. C'est utile pour un
+équipement piloté par une application de supervision, qui ne peut pas se
+réinscrire toutes les 60 s.
+
+L'endpoint porte le chemin `/GlobalDiscoveryServer`, imposé par la Part 12 :
+
+```
+opc.tcp://<hôte>:4840/GlobalDiscoveryServer
+```
+
+Ce chemin est ce qui permet à un client de distinguer un GDS d'un LDS quand les
+deux écoutent sur 4840. Il est imposé par `gds/config.py` : un fichier de
+configuration ne peut pas le remplacer.
+
+| Option          | Défaut                | Rôle                                       |
+|-----------------|-----------------------|--------------------------------------------|
+| `--port`        | `4840`                | port OPC UA                                |
+| `--bind`        | `0.0.0.0`             | adresse d'écoute                           |
+| `--advertise`   | hostname de la machine| hôte annoncé aux clients                   |
+| `--database`    | `gds.db`              | fichier SQLite du registre                 |
+| `--no-database` | —                     | registre en mémoire seule                  |
+
+> **`--ttl` n'existe pas pour le GDS.** En portée globale il n'aurait aucun
+> effet : l'exposer laisserait croire qu'il pilote quelque chose.
+
+Un serveur inscrit auprès d'un GDS n'a pas à se réenregistrer, mais un serveur
+**retiré** doit le signaler : `RegisterServer` avec `IsOnline = False`
+(clause 5.5.5.1), ce que fait `sciicad.lifecycle.withdraw_from_lds` à l'arrêt.
+
+### Vider un registre global
+
+Aucune entrée n'expire. Pour repartir d'un registre vide, arrêter le GDS et
+supprimer `gds.db`. Un redémarrage seul ne suffit pas : c'est précisément ce qui
+distingue le GDS du LDS.
+
+---
+
 ## Options communes aux deux simulateurs
 
 | Option          | Défaut                   | Rôle                                                    |
@@ -139,12 +191,16 @@ En pratique, sur une VM :
 1. le LDS (une fois) ;
 2. les simulateurs, avec `--lds` pointant vers lui.
 
+Un GDS, s'il est déployé, s'enregistre lui-même auprès du LDS de chaque
+sous-réseau : c'est ainsi qu'un client le trouve via `FindServersOnNetwork` sur
+son LDS local.
+
 ## Cycle de vie et arrêt
 
 Un simulateur :
 
 - s'enregistre **après** être en écoute, jamais avant ;
-- se réenregistre toutes les 60 s ;
+- se réenregistre toutes les 60 s (imposé par la portée « local ») ;
 - retire son entrée du LDS à l'arrêt, sur `Ctrl+C` comme sur `SIGTERM`.
 
 `SIGTERM` est traité explicitement : c'est ce qu'envoient `systemd` et
@@ -153,6 +209,12 @@ Un simulateur :
 Si le LDS est injoignable au moment de l'arrêt, l'entrée reste visible jusqu'à
 l'expiration (`--ttl`, 300 s par défaut) : c'est un délai de grâce, pas une
 fuite.
+
+**Auprès d'un GDS, le délai de grâce n'existe pas.** Le retrait reste
+recommandé, mais un échec n'a aucune conséquence : l'inscription est de toute
+façon conservée jusqu'au retrait. Un arrêt brutal (coupure, `SIGKILL`) laisse
+donc une entrée périmée au registre, qu'aucun mécanisme n'évacuera. Il faut
+alors intervenir manuellement, ou vider `gds.db`.
 
 ## Certificats (optionnel)
 
@@ -253,12 +315,20 @@ Vérifications disponibles, sans toucher au LDS de production :
 
 ```bash
 uv run tools/selftest_lds.py               # LDS : registre, TTL, pagination
+uv run tools/selftest_gds.py               # GDS : services Part 4, portée globale
 uv run tools/selftest_thermo_lds.py        # sciicad.discovery : enregistrement/retrait
 uv run tools/selftest_thermo_lifecycle.py  # cycle réel des deux PLC, avec SIGTERM
 uv run tools/selftest_thermo_lifecycle.py protect-plc   # un seul simulateur
 ```
 
-Tous sortent avec un code non nul en cas d'échec.
+Tous sortent avec un code non nul en cas d'échec. Aucun ne touche aux serveurs
+de production : ils écoutent sur des ports éphémères et utilisent une base
+temporaire.
+
+`selftest_gds.py` interroge chaque service **par son NodeId normatif**. C'est la
+vérification qui distingue un vrai serveur de découverte d'une façade : si
+`FindServersOnNetwork` renvoie `BadUserAccessDenied`, le service n'est pas
+routé, quelle que soit la qualité du journal de démarrage.
 
 ## Dépannage
 

@@ -55,21 +55,25 @@ Name (URI d'application, DNS, IP, 127.0.0.1), KeyUsage, ExtendedKeyUsage
 > `NoSecurity` uniquement. Vérifier ces fichiers sur un PLC distant pour
 > activer le chiffrement.
 
-## Global Discovery Server (`gds/gds_server.py`)
+## Global Discovery Server — couche certificats, non exposée
 
-Le GDS centralise la gestion des certificats (OPC UA Part 12) :
+`gds/gds_server.py` contient une couche de gestion des certificats Part 11/12 :
+autorité de certification (émission, révocation, listes de confiance),
+enregistrement des applications, demandes de certificats par CSR, approbation,
+groupes de confiance, audit, et gestion des rôles en base
+(`authenticated_user`, `security_admin`, `configure_admin`, `discovery_admin`,
+`certificate_authority_admin`).
 
-- il joue le rôle d'**autorité de certification** (CA) : émission,
-  révocation, listes de confiance ;
-- les applications s'enregistrent (`RegisterApplication`) et peuvent demander
-  des certificats via CSR (`CreateCertificateRequest`), approbation
-  (`ApproveCertificateRequest`), statut (`GetCertificateStatus`) ;
-- stockage des certificats : `security.cert_store_path` dans
-  `gds/gds_config.yaml` (par défaut `~/.opc-foundation/certificate-stores`) ;
-- politique : authentification requise, longueur/politique de mot de passe,
-  durée de session définissables en config.
+**Ces fonctions ne sont pas atteignables en l'état.** Les services sont
+déclarés comme nœuds `Method` à NodeIds non normatifs, avec des entrées et
+sorties en `String` : aucun client OPC UA normatif ne les appelle. Ce n'est pas
+une réserve de forme, c'est un fait mesuré — un client standard interrogeant ce
+serveur n'atteint aucun de ces gestionnaires.
 
-Configuration clé (`gds_config.yaml`) :
+Le fichier reste dans le dépôt parce que la couche est cohérente et constitue
+la base de ce travail. Son exposition normative est la prochaine étape.
+
+Configuration prévue (`gds/gds_config.yaml` du prototype) :
 
 ```yaml
 security:
@@ -79,8 +83,17 @@ security:
   session_timeout_hours: 24
 ```
 
-Rôles gérés en base : `authenticated_user`, `security_admin`,
-`configure_admin`, `discovery_admin`, `certificate_authority_admin`.
+> Le `gds_config.yaml` effectivement livré décrit le **GDS de découverte**, et
+> non cette couche : `scope: global`, registre SQLite, pas de `security:`.
+> Les deux fichiers portent le même nom ; le point d'entrée `python -m gds` ne
+> lit pas les clés de certificat.
+
+### Portée de la découverte
+
+Le GDS de découverte reste en `NoSecurity` uniquement, comme le LDS : la
+découverte précède l'établissement d'un canal sécurisé, et la Part 4 impose
+que ces services n'exigent pas la sécurité des messages. La gestion des
+certificats est donc une couche distincte, au-dessus.
 
 ## Recommandations
 

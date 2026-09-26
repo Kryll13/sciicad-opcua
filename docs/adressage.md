@@ -44,6 +44,13 @@ Valeurs par défaut dans le code :
 | IHM               | `ihm`            | *à définir*               | 4840 | client ; consomme `thermo-plc`             |
 | GDS (à venir)     | `gds`            | *à définir*               | 4840 | non déployé ; endpoint `…/GlobalDiscoveryServer` |
 
+> Le GDS partage le port 4840 avec les autres serveurs. Il s'en distingue par
+> le **chemin** de son endpoint, `/GlobalDiscoveryServer`, imposé par la
+> Part 12 : sur une même machine, LDS et GDS ne peuvent pas être déployés tous
+> les deux sur 4840 qu'avec des hôtes ou des adresses distinctes. Prévoir un
+> second port (4841 par exemple) pour le GDS si les deux doivent tourner côte à
+> côte.
+
 ## Sous-réseau et réservation
 
 - `193.168.1.1` : passerelle.

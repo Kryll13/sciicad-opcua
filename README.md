@@ -6,6 +6,11 @@ Ce dépôt contient des serveurs OPC UA simulant des équipements industriels
 (thermostat, système de protection), un serveur de découverte local (LDS),
 un Global Discovery Server (GDS) ainsi que des clients et outils IHM.
 
+Le LDS et le GDS implémentent tous deux les services de découverte de la Part 4
+— `FindServers`, `FindServersOnNetwork`, `RegisterServer`, `RegisterServer2` —
+qui manquent à la pile `asyncua`. Ils partagent le même code d'assemblage ; seul
+le rôle diffère, par la portée du registre.
+
 ## Architecture
 
 ```
@@ -114,7 +119,7 @@ uv run tools/ihm_action.py --ip 193.168.1.90 --heat off --maintenance on # maint
 
 ## Documentation technique
 
-- [`docs/demarrage.md`](docs/demarrage.md) — **commandes de démarrage** (LDS, thermo-plc, protect-plc)
+- [`docs/demarrage.md`](docs/demarrage.md) — **commandes de démarrage** (LDS, GDS, thermo-plc, protect-plc)
 - [`docs/architecture.md`](docs/architecture.md) — topologie opcua, flux, adressage
 - [`docs/adressage.md`](docs/adressage.md) — plan d'adressage et de nommage des équipements
 - [`docs/serveurs.md`](docs/serveurs.md) — LDS, GDS, thermo-plc, protect-plc, IHM
@@ -134,7 +139,7 @@ docker build -t sciicad-lds -f lds/Dockerfile .
 Les `Dockerfile` de `gds/`, `ihm/`, `thermo-plc/` et `protect-plc/` sont
 **cassés** : ils copient un `requirements.txt` qui n'existe pas dans le dépôt,
 le `docker build` échoue. Le détail figure dans
-[`docs/serveurs.md`](serveurs.md#containerisation).
+[`docs/serveurs.md`](docs/serveurs.md#containerisation).
 
 Aucun build n'a pu être exécuté lors de la rédaction (Docker indisponible) :
 même le Dockerfile du LDS reste **non vérifié**.

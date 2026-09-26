@@ -109,11 +109,25 @@ uv run tools/crypto_opcua.py --hostname thermo-plc --output-dir thermo-plc
 
 ### 8. Le GDS ne répond pas aux tests
 
-- Vérifier `opc.tcp://localhost:4840/GlobalDiscoveryServer` dans
-  `gds/gds_config.yaml` (chemin significatif pour le GDS).
-- Vérifier la base : `gds.db` est créée en sqlite au démarrage ; la
-  destruction de ce fichier réinitialise utilisateurs/roles/applications.
-- `tools/test_gds.py` attend le GDS sur `opc.tcp://localhost:4840`.
+Le point d'entrée est `uv run python -m gds`, et l'endpoint inclut le chemin :
+
+```bash
+uv run python -m gds --bind 0.0.0.0 --advertise <hôte>
+uv run tools/check_lds_gds.py --url opc.tcp://<hôte>:4840/GlobalDiscoveryServer --expect discovery
+```
+
+- `tools/check_lds_gds.py` annonce « serveur OPC UA ordinaire » tant que le
+  registre est **vide** : il déduit le rôle de la présence d'entrées
+  étrangères, pas du seul endpoint. Inscrire un serveur avant de conclure.
+- `FindServersOnNetwork` doit répondre **sans session**. S'il renvoie
+  `BadUserAccessDenied`, le routage du service n'est pas installé : c'est le
+  symptôme exact du GDS précédent, qui n'exposait que des nœuds `Method` non
+  normatifs. Vérifier avec `uv run tools/selftest_gds.py`.
+- Vérifier la base : `gds.db` est créée en SQLite au démarrage. Contrairement
+  au LDS, une entrée **n'expire pas** (portée globale) ; la destruction du
+  fichier est donc le seul moyen de vider le registre.
+- `tools/test_gds.py` cible l'ancienne couche certificats de
+  `gds/gds_server.py` : il ne s'applique pas au GDS de découverte.
 
 ### 9. `ihm/ihm_client.py` ou Docker : dépendances
 

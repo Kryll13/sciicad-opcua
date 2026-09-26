@@ -67,14 +67,32 @@ inatteignable.
 
 ### Rôle du GDS
 
-Le GDS (`gds/gds_server.py`) implémente le rôle de **Global Discovery Server**
-OPC UA (Part 12) :
+Le GDS est un **serveur de découverte de portée globale** (Part 12). Il partage
+tout son câblage avec le LDS : mêmes services de la Part 4, même persistance,
+aucune duplication de code. `gds/server.py::GlobalDiscoveryServer` hérite de
+`lds/server.py::DiscoveryServer` et ne change que la configuration.
 
-- gestion des applications (RegisterApplication / QueryApplications /
-  UnregisterApplication) ;
-- gestion des certificats (CA, GetCertificate, CSR, approbation…) ;
-- certificats 3.0 (GetCertificateGroups, GetTrustLists, changements).
-- persistance en base (SQLAlchemy, configurable : sqlite par défaut).
+La différence tient en un champ, `discovery.scope` :
+
+| Portée   | Rôle | Expiration | Renouvellement | Registre restauré |
+|----------|------|------------|----------------|-------------------|
+| `local`  | LDS  | 300 s      | imposé (~60 s) | soumis au TTL   |
+| `global` | GDS  | aucune     | non imposé     | fait foi         |
+
+Un serveur inscrit auprès d'un GDS n'a donc pas à se réenregistrer : son
+inscription vaut jusqu'à son retrait explicite. L'endpoint porte en plus le
+chemin `/GlobalDiscoveryServer`, ce qui permet à un client de distinguer les
+deux rôles sur la seule URL.
+
+### Portée de la couche certificats
+
+`gds/gds_server.py` (2126 lignes) contient une couche de gestion des
+certificats Part 11/12 — registre SQLAlchemy, autorité de certification,
+groupes de confiance, audit, ~950 lignes — **dont l'exposition normative reste à
+faire**. Les services qu'elle déclare (`RegisterApplication`, `GetCertificate`,
+`GetTrustLists`…) sont des nœuds `Method` à NodeIds non normatifs, qu'aucun
+client OPC UA n'appelle. Le fichier est conservé comme base de ce travail, pas
+comme point d'entrée.
 
 ## Adressage des nœuds
 
