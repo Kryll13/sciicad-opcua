@@ -182,6 +182,24 @@ le LDS est indisponible, et absence de résurrection après redémarrage du LDS.
 uv run tools/selftest_thermo_lds.py
 ```
 
+### `selftest_gds.py` — conformité du GDS aux services de la Part 4
+
+Interroge le GDS **par les NodeIds normatifs**, depuis un client OPC UA
+ordinaire, et échoue si une réponse change de forme. C'est la garantie qui
+manquait : l'ancien GDS annonçait ces services dans son journal sans répondre à
+rien.
+
+```bash
+uv run tools/selftest_gds.py
+```
+
+Vérifié notamment : `FindServersOnNetwork` répond sans session (NodeId 12208) —
+sans le patch, la requête tombe dans la branche « pas de session » d'asyncua et
+reçoit `BadUserAccessDenied` —, `RegisterServer` rend un serveur découvrable
+avec un `RecordId` croissant, le retrait par `IsOnline = False` évacue l'entrée
+de la mémoire *et* de la base, et le registre restauré au démarrage fait foi
+sans renouvellement.
+
 ### `selftest_thermo_lifecycle.py` — cycle de vie réel (SIGTERM)
 
 Lance un PLC dans un vrai sous-processus face à un LDS, puis envoie `SIGTERM`

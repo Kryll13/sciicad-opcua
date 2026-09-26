@@ -1,70 +1,41 @@
-# Configuration du serveur Global Discovery Server OPC-UA
+# Configuration du Global Discovery Server SCIICAD
+#
+# Le GDS et le LDS partagent les memes options : la difference tient a la
+# portee du registre (global) et au chemin de l'endpoint.
+#
+# Portee "global" : une inscription reste valide jusqu'a son retrait explicite.
+# Aucun renouvellement periodique n'est donc impose aux serveurs inscrits, et
+# le registre restaure au demarrage fait foi. C'est ce qui distingue un GDS
+# d'un LDS, dont les entrees restaurees sont soumises au TTL.
+#
+# Le champ server.endpoint_path n'est pas modifiable ici volontairement : la
+# Part 12 impose /GlobalDiscoveryServer pour ce role, et c'est ce qui permet a
+# un client de distinguer un GDS d'un LDS sur la seule URL.
 
 server:
-  # Point d'entrée du serveur OPC-UA
-  endpoint: opc.tcp://localhost:4840/GlobalDiscoveryServer
-  
-  # Informations de l'application
-  application_name: Global Discovery Server
-  application_uri: urn:localhost:GlobalDiscoveryServer
-  product_uri: urn:OPC Foundation:GlobalDiscoveryServer
-  
-  # Limites de connexion
-  max_connections: 100
-  timeout: 60  # secondes
-  
-  # Mode debug
-  debug: false
+  bind_address: 0.0.0.0
+  port: 4840
+
+  # Sur une VM, renseigner une adresse joignable par les clients. Le hostname
+  # de la machine ne l'est pas necesariamente.
+  advertise_host: null
+
+  application_name: SCIICAD GDS
+  application_uri: urn:SCIICAD:gds
+  product_uri: urn:SCIICAD:product:gds
+  manufacturer_name: SCIICAD
+  software_version: "1.0"
+
+discovery:
+  scope: global
+  find_servers_on_network: true
+
+  # Sans effet en portee globale : conserve pour la lisibilite du fichier et
+  # pour un basculement eventuel vers "local".
+  entry_ttl_seconds: 300
+  sweep_interval_seconds: 60
 
 database:
-  # Type de base de données: sqlite, postgresql, mysql
-  type: sqlite
-  
-  # URL de connexion (override les paramètres ci-dessous)
-  url: sqlite:///gds.db
-  
-  # Paramètres de connexion
-  host: localhost
-  port: 5432
-  database: gds
-  user: gds_user
-  password: gds_password
-
-security:
-  # Chemin de stockage des certificats
-  # Si non défini: ~/.opc-foundation/certificate-stores
-  cert_store_path: null
-  
-  # Taille des clés RSA
-  key_size: 2048
-  
-  # Validité des certificats (jours)
-  certificate_validity_days: 365
-  
-  # Exiger l'authentification
-  require_authentication: true
-  
-  # Durée de validité des sessions (heures)
-  session_timeout_hours: 24
-  
-  # Politique de mot de passe
-  password_min_length: 8
-  password_require_uppercase: true
-  password_require_numbers: true
-  password_require_special: false
-
-logging:
-  # Niveau de log: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  level: INFO
-  
-  # Format des logs
-  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
-  
-  # Fichier de log (null = console seulement)
-  file: null
-  
-  # Rotation des fichiers de log
-  file_rotation: "500 MB"
-  
-  # Nombre de fichiers de log à conserver
-  file_retention: 10
+  enabled: true
+  path: gds.db
+  event_log: true

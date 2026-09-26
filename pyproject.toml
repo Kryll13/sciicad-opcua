@@ -23,4 +23,4 @@ build-backend = "setuptools.build_meta"
 # empaquetés, et ils sont listés explicitement car setuptools ne peut pas les
 # découvrir seul : la racine contient des répertoires non conventionnels.
 [tool.setuptools]
-packages = ["lds", "sciicad"]
+packages = ["lds", "gds", "sciicad"]

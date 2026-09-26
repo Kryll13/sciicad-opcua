@@ -1,7 +1,11 @@
-"""Point d'entrée en ligne de commande du LDS.
+"""Point d'entrée en ligne de commande du GDS.
 
-    python -m lds [--config lds_config.yaml] [--port 4840]
+    python -m gds [--config gds_config.yaml] [--port 4840]
                   [--bind 0.0.0.0] [--advertise <hôte>] [--no-database]
+
+``--ttl`` est volontairement absent : en portée globale une inscription ne
+expire pas, le paramètre n'aurait aucun effet. Les autres arguments sont
+ceux du LDS, gérés par :mod:`sciicad.cli`.
 """
 
 from __future__ import annotations
@@ -13,25 +17,23 @@ import sys
 from loguru import logger
 from sciicad.cli import add_discovery_arguments, load_discovery_config
 
-from .config import DEFAULT_CONFIG_FILENAME, LDSConfig
-from .server import LocalDiscoveryServer
+from .config import DEFAULT_CONFIG_FILENAME, GDSConfig
+from .server import GlobalDiscoveryServer
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="python -m lds",
-        description="Serveur de découverte local OPC UA (LDS) — projet SCIICAD",
+        prog="python -m gds",
+        description="Serveur de découverte global OPC UA (GDS) — projet SCIICAD",
     )
-    add_discovery_arguments(parser, DEFAULT_CONFIG_FILENAME, with_ttl=True)
+    add_discovery_arguments(parser, DEFAULT_CONFIG_FILENAME, with_ttl=False)
     return parser.parse_args(argv)
 
 
-def build_config(args: argparse.Namespace) -> LDSConfig:
+def build_config(args: argparse.Namespace) -> GDSConfig:
     """Construit la configuration, la ligne de commande primant sur le YAML."""
-    config, error = load_discovery_config(LDSConfig, args)
+    config, error = load_discovery_config(GDSConfig, args)
     if isinstance(error, FileNotFoundError):
-        # Un --config explicite et absent est une erreur de l'utilisateur : il
-        # faut le dire, pas démarrer silencieusement avec les défauts.
         raise error
     if error is not None:
         logger.error(f"Configuration illisible ({error}) : valeurs par défaut")
@@ -56,18 +58,19 @@ async def _main(argv: list[str] | None = None) -> int:
         f"Valeurs effectives : port={config.server.port} "
         f"bind={config.server.bind_address} "
         f"advertise={config.server.resolve_advertise_host()} "
-        f"ttl={config.discovery.entry_ttl_seconds}s "
+        f"portée={config.discovery.scope} "
         f"base={'désactivée' if not config.database.enabled else config.database.path}"
     )
+    logger.info(f"Endpoint annoncé : {config.server.endpoint_url}")
 
-    lds = LocalDiscoveryServer(config)
+    gds = GlobalDiscoveryServer(config)
     try:
-        await lds.run_forever()
+        await gds.run_forever()
     except asyncio.CancelledError:
-        await lds.stop()
+        await gds.stop()
     except OSError as exc:
         logger.error(f"Démarrage impossible : {exc}")
-        await lds.stop()
+        await gds.stop()
         return 1
     return 0
 

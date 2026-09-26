@@ -103,17 +103,32 @@ def _normalise_capability_filter(raw: Any) -> list[str]:
 
 
 class ServerRegistry:
-    """Etat du registre, avec ecriture dans le store."""
+    """Etat du registre, avec ecriture dans le store.
+
+    Le registre sert deux rôles, distingués par ``scope`` :
+
+    * ``local`` (LDS) : une inscription n'est valable que jusqu'à expiration.
+      Un serveur se ré-enregistre périodiquement ; faute de renouvellement,
+      l'entrée est évacuée.
+    * ``global`` (GDS) : une inscription est conservée jusqu'à retrait
+      explicite. Rien n'expire, donc aucun renouvellement périodique n'est
+      imposé au serveur inscrit. C'est la différence normative entre les deux
+      rôles, et la seule : le câblage des services est identique.
+    """
 
     def __init__(
         self,
         iserver: Any,
         store: Optional[Any] = None,
         ttl_seconds: float = 300.0,
+        scope: str = "local",
     ) -> None:
+        if scope not in ("local", "global"):
+            raise ValueError(f"portée de registre inconnue : {scope!r}")
         self.iserver = iserver
         self.store = store
         self.ttl_seconds = float(ttl_seconds)
+        self.scope = scope
 
         # Dernier renouvellement observe en memoire. Ce dict evite une lecture
         # SQLite par entree et par balayage ; le store reste la source de
@@ -252,14 +267,31 @@ class ServerRegistry:
         else:
             logger.debug(f"Desenregistrement de {application_uri} : entree inconnue")
 
+    def unregister(self, application_uri: str) -> bool:
+        """Retire une entree du registre. Retourne ``True`` si elle existait.
+
+        Point d'entree du GDS, ou la Part 12 prevoit un retrait explicite sans
+        passer par un signal protocolaire. Le LDS passe lui par
+        ``RegisterServer`` avec ``IsOnline = False``, traite dans
+        :meth:`register` : les deux chemins convergent ici.
+        """
+        if application_uri not in self._known:
+            return False
+        self._go_offline(application_uri)
+        return True
+
     # -- expiration ---------------------------------------------------------
 
     def is_expired(self, application_uri: str, now: Optional[float] = None) -> bool:
         """Indique si une entree n'a pas ete renouee assez recemment.
 
-        Les endpoints du LDS lui-meme ne sont jamaisExpires : ils sont par
-        definition en ligne tant que le processus tourne.
+        En portee ``global`` (GDS) rien n'expire : l'inscription vaut jusqu'au
+        retrait explicite du serveur. Les endpoints du serveur de decouverte
+        lui-meme ne sont jamais expires non plus : ils sont par definition en
+        ligne tant que le processus tourne.
         """
+        if self.scope == "global":
+            return False
         if application_uri in self.self_uris():
             return False
         last = self._last_seen.get(application_uri)
@@ -272,7 +304,10 @@ class ServerRegistry:
 
         Appelee periodiquement en tache de fond, et aussi avant chaque
         FindServersOnNetwork, pour qu'aucun client ne recoive un endpoint mort.
+        Sans effet en portee ``global`` : rien n'y expire.
         """
+        if self.scope == "global":
+            return []
         now = time.time()
         expired = [uri for uri in self.application_uris() if self.is_expired(uri, now)]
         if not expired:
@@ -308,10 +343,14 @@ class ServerRegistry:
     async def restore(self) -> int:
         """Recharge le registre depuis le store au demarrage.
 
-        Les entrees restaurees sont marquees hors ligne et soumises au TTL :
-        elles ne sont pas « ressuscitees », elles sont reconnues jusqu'a ce
-        qu'un serveur se re-enregistre ou que le balayage les retire. Les
-        endpoints propres du LDS ne sont jamais ecrases.
+        En portee ``local``, les entrees restaurees sont soumises au TTL : elles
+        ne sont pas « ressuscitees », elles sont reconnues jusqu'a ce qu'un
+        serveur se re-enregistre ou que le balayage les retire.
+
+        En portee ``global`` (GDS) elles font foi et restent en place : c'est le
+        sens d'un registre global, qui survit au redémarrage du service.
+
+        Les endpoints propres du serveur de decouverte ne sont jamais ecrases.
         """
         if self.store is None:
             return 0

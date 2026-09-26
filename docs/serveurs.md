@@ -62,34 +62,51 @@ immédiatement le registre (les serveurs se réenregistrent ensuite d'eux-mêmes
 
 ## GDS — Global Discovery Server (`gds/`)
 
-`gds_server.py` — implementation "single file" (≈ 2000 lignes) d'un Global
-Discovery Server OPC UA (Part 12) avec gestion des certificats.
+Paquet Python (`uv run python -m gds`), application `urn:SCIICAD:gds`. Le GDS
+réutilise l'assemblage du LDS : mêmes services de la Part 4, même persistance,
+aucune duplication.
 
-Configuré par `gds_config.yaml` :
+| Fichier          | Rôle                                                    |
+|------------------|---------------------------------------------------------|
+| `__main__.py`    | point d'entrée en ligne de commande                     |
+| `config.py`      | configuration YAML, valeurs par défaut du rôle GDS     |
+| `server.py`      | `GlobalDiscoveryServer`, spécialisation de `DiscoveryServer` |
+| `gds_config.yaml`| configuration                                          |
 
-- `server.endpoint` : `opc.tcp://localhost:4840/GlobalDiscoveryServer`
-- `database` : SQLAlchemy, `type: sqlite` par défaut (`sqlite:///gds.db`),
-  `postgresql`/`mysql` configurables.
-- `security` : chemin de stockage des certificats, taille de clé (2048),
-  validité (365 j), authentification requise, politique de mot de passe.
-- `logging` : niveau, format, fichier/rotation (loguru).
+### Ce qui distingue le GDS du LDS
 
-Fonctionnalités exposées :
+Un seul champ : `discovery.scope`.
 
-- applications : RegisterApplication, QueryApplications, UnregisterApplication ;
-- certificats : GetCertificate, CreateCertificateRequest, GetCertificateStatus,
-  ApproveCertificateRequest, GetCertificateGroups, GetTrustLists,
-  Start/GetCertificateChanges ;
-- gestion des rôles et utilisateurs en base (authenticated_user,
-  security_admin, configure_admin, discovery_admin, certificate_authority_admin).
+| Portée  | Rôle | Expiration | Renouvellement | Registre restauré |
+|---------|------|------------|----------------|-------------------|
+| `local` | LDS  | oui, 300 s | imposé (~60 s) | soumis au TTL |
+| `global`| GDS  | **aucune** | **non imposé** | **fait foi** |
+
+L'endpoint porte en plus le chemin `/GlobalDiscoveryServer`, fixé par la Part 12
+et imposé par `gds/config.py` : un client distingue ainsi les deux rôles sur la
+seule URL, y compris s'ils écoutent tous deux sur 4840.
 
 Lancement :
 
 ```bash
-uv run gds/gds_server.py
+uv run python -m gds --bind 0.0.0.0 --advertise <hôte> --database gds.db
 ```
 
-Client de test : `tools/test_gds.py` (phases 1–3).
+`--ttl` n'est pas proposé : en portée globale il n'aurait aucun effet.
+
+### `gds/gds_server.py` — prototype de la couche certificats
+
+Ce fichier (2126 lignes) reste dans le dépôt mais **n'est plus le point
+d'entrée**, et ses services ne sont pas exploitables tels quels. Il exposait
+« FindServers », « FindServersOnNetwork », « RegisterServer » et
+« RegisterServer2 » comme des nœuds `Method` à NodeIds inventés (1030-1033) avec
+des entrées et sorties en `String` : aucun client OPC UA normatif ne les
+appelle, un `FindServers` standard ne renvoyait que le GDS lui-même, et un
+`FindServersOnNetwork` se faisait refuser par `BadUserAccessDenied`.
+
+Sa couche certificats (registre SQLAlchemy, CA, groupes de confiance, audit)
+n'a jamais été atteignable non plus. Elle reste la base de la Part 11/12, mais
+son exposition normative reste à faire.
 
 ## thermo-plc — PLC Thermostat (`thermo-plc/`)
 

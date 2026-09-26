@@ -7,27 +7,23 @@ défaut utilisable, de sorte qu'un LDS peut démarrer sans fichier de config.
 from __future__ import annotations
 
 import socket
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_FILENAME = "lds_config.yaml"
 
-
-def default_config_candidates() -> list[Path]:
-    """Chemins cherchés quand ``--config`` n'est pas fourni.
-
-    Le LDS est normalement lancé depuis la racine du dépôt (``uv run python -m
-    lds``), mais le fichier de configuration vit dans ``lds/``. Sans cette
-    double recherche, la configuration serait silencieusement ignorée et le
-    serveur démarrerait avec les valeurs par défaut.
-    """
-    return [
-        Path(DEFAULT_CONFIG_FILENAME),                 # répertoire courant
-        Path(__file__).resolve().parent / DEFAULT_CONFIG_FILENAME,  # lds/
-    ]
+# Portée du registre, au sens de la Part 12.
+#
+# - "local"  : inscription valable jusqu'à expiration (LDS). Un serveur se
+#              ré-enregistre périodiquement, faute de quoi l'entrée est
+#              évacuée.
+# - "global" : inscription conservée jusqu'à retrait explicite (GDS). Aucune
+#              expiration, donc pas de renouvellement périodique imposé.
+DiscoveryScope = Literal["local", "global"]
 
 
 class ServerConfig(BaseModel):
@@ -49,12 +45,28 @@ class ServerConfig(BaseModel):
     manufacturer_name: str = "SCIICAD"
     software_version: str = "1.0"
 
+    # Chemin de l'endpoint annoncé. Vide pour un LDS, dont l'URL est
+    # simplement opc.tcp://<hôte>:<port>. Un GDS annonce
+    # /GlobalDiscoveryServer, ce que la Part 12 fixe pour ce rôle.
+    endpoint_path: str = ""
+
     @field_validator("port")
     @classmethod
     def _check_port(cls, value: int) -> int:
         if not 1 <= value <= 65535:
             raise ValueError(f"port hors plage: {value} (attendu 1..65535)")
         return value
+
+    @field_validator("endpoint_path")
+    @classmethod
+    def _check_path(cls, value: str) -> str:
+        cleaned = value.strip().strip("/")
+        if " " in cleaned or "://" in cleaned:
+            raise ValueError(
+                f"endpoint_path doit être un chemin simple, sans espace ni "
+                f"schéma : {value!r}"
+            )
+        return cleaned
 
     def resolve_advertise_host(self) -> str:
         """Retourne l'hôte à annoncer.
@@ -69,7 +81,8 @@ class ServerConfig(BaseModel):
     @property
     def endpoint_url(self) -> str:
         """URL d'endpoint annoncée aux clients."""
-        return f"opc.tcp://{self.resolve_advertise_host()}:{self.port}"
+        base = f"opc.tcp://{self.resolve_advertise_host()}:{self.port}"
+        return f"{base}/{self.endpoint_path}" if self.endpoint_path else base
 
 
 class DiscoveryConfig(BaseModel):
@@ -81,6 +94,10 @@ class DiscoveryConfig(BaseModel):
     entry_ttl_seconds: int = 300
     sweep_interval_seconds: int = 60
     find_servers_on_network: bool = True
+
+    # "local" pour un LDS, "global" pour un GDS. Le champ ne change pas le
+    # câblage des services, seulement la durée de vie des inscriptions.
+    scope: DiscoveryScope = "local"
 
     @field_validator("entry_ttl_seconds")
     @classmethod
@@ -106,7 +123,11 @@ class DatabaseConfig(BaseModel):
 
 
 class LDSConfig(BaseModel):
-    """Configuration complète du LDS."""
+    """Configuration complète d'un serveur de découverte.
+
+    Sert de base au LDS et au GDS, qui ne diffèrent que par les valeurs par
+    défaut de :attr:`config_filename` et des champs_factory ci-dessous.
+    """
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
@@ -115,6 +136,32 @@ class LDSConfig(BaseModel):
     # Fichier réellement chargé, renseigné par load(). Champ privé exclu de la
     # validation : il ne fait pas partie de la configuration elle-même.
     _loaded_from: Optional[str] = None
+
+    #: Nom du fichier de configuration cherché quand --config est absent.
+    config_filename: ClassVar[str] = DEFAULT_CONFIG_FILENAME
+
+    @classmethod
+    def package_dir(cls) -> Path:
+        """Répertoire du paquet qui définit cette configuration.
+
+        Résolu depuis le module de la classe, afin qu'une sous-classe située
+        dans un autre dossier cherche son propre fichier sans avoir à le
+        déclarer.
+        """
+        module = sys.modules.get(cls.__module__)
+        filename = getattr(module, "__file__", None)
+        return Path(filename).resolve().parent if filename else Path.cwd()
+
+    @classmethod
+    def config_candidates(cls) -> list[Path]:
+        """Emplacements cherchés quand ``--config`` n'est pas fourni.
+
+        Le répertoire courant d'abord, puis le dossier du paquet. Sans cette
+        double recherche, la configuration serait silencieusement ignorée lors
+        d'un lancement depuis la racine du dépôt, et le serveur démarrerait
+        avec les valeurs par défaut.
+        """
+        return [Path(cls.config_filename), cls.package_dir() / cls.config_filename]
 
     @property
     def source(self) -> str:
@@ -135,12 +182,12 @@ class LDSConfig(BaseModel):
     def load(cls, path: Optional[str | Path] = None) -> "LDSConfig":
         """Charge la configuration, ou retombe sur les défauts.
 
-        Sans ``path``, les emplacements de :func:`default_config_candidates`
-        sont essayés dans l'ordre. Un fichier absent n'est pas une erreur : le
-        LDS doit pouvoir démarrer sur une VM vierge avec les valeurs par
+        Sans ``path``, les emplacements de :meth:`config_candidates` sont
+        essayés dans l'ordre. Un fichier absent n'est pas une erreur : le
+        serveur doit pouvoir démarrer sur une VM vierge avec les valeurs par
         défaut.
         """
-        candidates = [Path(path)] if path is not None else default_config_candidates()
+        candidates = [Path(path)] if path is not None else cls.config_candidates()
         for candidate in candidates:
             if candidate.exists():
                 config = cls.from_file(candidate)
@@ -151,6 +198,6 @@ class LDSConfig(BaseModel):
             raise FileNotFoundError(
                 f"fichier de configuration introuvable : {path} "
                 f"(emplacements par défaut : "
-                f"{', '.join(str(c) for c in default_config_candidates())})"
+                f"{', '.join(str(c) for c in cls.config_candidates())})"
             )
         return cls()

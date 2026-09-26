@@ -20,12 +20,12 @@ un Global Discovery Server (GDS) ainsi que des clients et outils IHM.
             │ thermo-plc  │ │ protect-plc│   │  GDS :4840    │
             │ :4840       │ │ :4840      │   │ (Global       │
             │ thermostat  │ │ protection │   │  Discovery)   │
-            └─────────────┘ └────────────┘   └───────────────┘
-                    │             │                  ▲
-                    └──────┬──────┘                  │ certificats
-                           ▼                         │
-                  ┌────────────────┐                 │
-                  │  IHM / clients │─────────────────┘
+            └─────────────┘ └─────────────┘   └───────────────┘
+                    │             │
+                    └──────┬──────┘   LDS et GDS partagent le même code
+                           ▼          d'assemblage : seule la portée du
+                  ┌────────────────┐  registre diffère (« local » avec
+                  │  IHM / clients │  expiration, « global » sans).
                   │ ihm_action.py  │  interroge/commande les PLC
                   │ ihm_client.py  │
                   └────────────────┘
@@ -33,6 +33,9 @@ un Global Discovery Server (GDS) ainsi que des clients et outils IHM.
 
 Les simulateurs s'enregistrent auprès du LDS (`register_to_discovery`) au
 démarrage et **se réenregistrent périodiquement** (toutes les 60 s par défaut).
+Ce renouvellement est imposé par la portée « local » : une inscription non
+renouvelée est évacuée après le TTL. Auprès d'un GDS, la portée « global »
+conserve l'inscription jusqu'au retrait explicite, sans renouvellement.
 L'IHM et les outils se connectent directement aux serveurs concernés.
 
 > **À noter** : la norme OPC UA ne définit aucun service de désenregistrement
@@ -45,7 +48,7 @@ L'IHM et les outils se connectent directement aux serveurs concernés.
 | Dossier        | Rôle                                              | Endpoint par défaut        |
 |----------------|---------------------------------------------------|----------------------------|
 | `lds/`         | Serveur de découverte local (LDS)                 | `opc.tcp://<ip>:4840`      |
-| `gds/`         | Global Discovery Server (GDS) + gestion certs    | `:4840/GlobalDiscoveryServer` |
+| `gds/`         | Global Discovery Server (GDS), portée globale  | `:4840/GlobalDiscoveryServer` |
 | `thermo-plc/`  | Simulateur PLC thermostat                          | `opc.tcp://<ip>:4840`      |
 | `protect-plc/` | Simulateur PLC système de protection              | `opc.tcp://<ip>:4840`      |
 | `ihm/`         | Client IHM (affichage continu du thermostat)      | `opc.tcp://thermo-plc:4840` |
@@ -54,9 +57,11 @@ L'IHM et les outils se connectent directement aux serveurs concernés.
 
 ### Organisation du code
 
-`lds/`, `gds/`, `thermo-plc/` et `protect-plc/` sont des composants
-autonomes. Tout ce qui est commun à plusieurs d'entre eux vit dans le paquet
-`sciicad/` : identité d'application, enregistrement auprès d'un LDS, cycle
+`lds/`, `thermo-plc/` et `protect-plc/` sont des composants autonomes.
+`gds/` réutilise l'assemblage de `lds/` : les deux rôles ne diffèrent que par
+la portée du registre et le chemin de l'endpoint, et n'ont donc aucun service
+de découverte dupliqué. Tout ce qui est commun à plusieurs d'entre eux vit
+dans le paquet `sciicad/` : identité d'application, enregistrement auprès d'un LDS, cycle
 d'arrêt, arguments de ligne de commande, lecture d'espace d'adressage,
 configuration console et banc de test.
 
