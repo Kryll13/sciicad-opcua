@@ -1,213 +1,126 @@
 #!/usr/bin/env python3
 """
-Outil d'analyse d'un serveur OPCUA PLC.
+Inspecte l'espace d'adressage d'un serveur OPC UA.
 
-Affiche les variables exposées, leur mode d'accès et leur valeur actuelle.
+Pour chaque variable, affiche le chemin, le niveau d'accès réel et la
+valeur. C'est l'outil de référence pour vérifier ce qu'un PLC publie
+réellement, indépendamment de ce que dit la documentation.
 
-Usage:
-    python analyze.py -u <url_plc>
+Code de sortie non nul si le serveur est injoignable ou ne publie aucune
+variable.
 
-Exemple:
-    python analyze.py -u opc.tcp://localhost:4840
+    uv run tools/analyze.py -u opc.tcp://193.168.1.90:4840
 """
 
 import argparse
 import asyncio
 import sys
-from asyncua import Client, ua
+
+from asyncua import Client
+
+from sciicad.console import banner, logger, setup
+from sciicad.nodes import (
+    STANDARD_TREES,
+    access_label,
+    find_by_path,
+    list_children,
+    server_array,
+)
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
+def parse_args(argv=None):
+    """Analyse les arguments de la ligne de commande."""
     parser = argparse.ArgumentParser(
-        description="Analyse les variables d'un serveur OPCUA PLC"
+        description="Inspecte l'espace d'adressage d'un serveur OPC UA",
     )
     parser.add_argument(
-        '-u', '--url',
-        type=str,
-        required=True,
-        help="URL du serveur OPCUA (ex: opc.tcp://localhost:4840)"
+        "-u", "--url", required=True,
+        help="URL du serveur, ex : opc.tcp://193.168.1.90:4840",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--depth", type=int, default=3,
+        help="profondeur de parcours (défaut : 3)",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=15.0,
+        help="délai maximal par appel, en secondes (défaut : 15)",
+    )
+    return parser.parse_args(argv)
 
 
-async def get_access_mode(node, client) -> str:
-    """
-    Détermine le mode d'accès à partir du AccessLevel.
-    
-    Args:
-        node: Node OPCUA
-        client: Client OPCUA
-        
-    Returns:
-        Chaîne décrivant le mode d'accès
-    """
-    # Bit positions according to OPC UA spec
-    CURRENT_READ = 1    # bit 0
-    CURRENT_WRITE = 2   # bit 1
-    
-    try:
-        # Lire AccessLevel
-        access_level = await node.read_attribute(ua.AttributeIds.AccessLevel)
-        if access_level.StatusCode.is_good() and access_level.Value is not None:
-            val = access_level.Value
-            if hasattr(val, 'Value'):
-                access = val.Value
-            else:
-                access = val
-            
-            # Vérifier si c'est un entier
-            if isinstance(access, int):
-                can_read = bool(access & CURRENT_READ)
-                can_write = bool(access & CURRENT_WRITE)
-                
-                if can_read and can_write:
-                    return "lecture/écriture"
-                elif can_read:
-                    return "lecture seule"
-    except Exception as e:
-        pass
-    
-    return "lecture seule"
+def format_value(value) -> str:
+    """Met en forme une valeur pour l'affichage en colonne."""
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    if isinstance(value, bool):
+        return "Vrai" if value else "Faux"
+    if isinstance(value, (list, tuple)) and len(value) > 4:
+        return f"[{len(value)} éléments]"
+    text = str(value)
+    return text if len(text) <= 40 else text[:37] + "..."
 
 
-async def browse_variables(node, client, depth=0, max_depth=3, parent_name=""):
-    """
-    Parcourt récursivement les nodes pour trouver les variables.
-    
-    Args:
-        node: Node OPCUA à parcourir
-        client: Client OPCUA
-        depth: Profondeur actuelle
-        max_depth: Profondeur maximale
-        parent_name: Nom du parent pour construire le chemin
-        
-    Returns:
-        Liste de tuples (nom_complet, mode_accès, valeur)
-    """
-    from asyncua.common.node import Node
-    variables = []
-    
-    if depth > max_depth:
-        return variables
-    
-    try:
-        # Obtenir les enfants du node
-        children = await node.get_children()
-        
-        for child in children:
-            try:
-                # Assurer que c'est un Node
-                if not isinstance(child, Node):
-                    child = Node(client, child)
-                
-                # Obtenir le browse name
-                browse_name = await child.read_browse_name()
-                if hasattr(browse_name, 'Name'):
-                    name = browse_name.Name
-                else:
-                    name = str(browse_name)
-                
-                # Obtenir le node class pour déterminer le type
-                node_class = await child.read_node_class()
-                
-                # Si c'est une variable
-                if node_class == ua.NodeClass.Variable:
-                    # Obtenir la valeur
-                    try:
-                        value = await child.get_value()
-                        
-                        # Obtenir le mode d'accès
-                        access_mode = await get_access_mode(child, client)
-                        
-                        full_name = f"{parent_name}.{name}" if parent_name else name
-                        variables.append((full_name, access_mode, str(value)))
-                    except Exception as e:
-                        pass
-                elif node_class == ua.NodeClass.Object:
-                    # C'est un objet, parcourir ses enfants
-                    # Ignorer les objets système (Server, Aliases, etc.)
-                    if name in ("Server", "Alias", "Aliases", "Types", "Views", "Views", "Objects", "Localization"):
-                        continue
-                    full_parent = f"{parent_name}.{name}" if parent_name else name
-                    child_vars = await browse_variables(child, client, depth + 1, max_depth, full_parent)
-                    variables.extend(child_vars)
-                        
-            except Exception:
-                continue
-                
-    except Exception:
-        pass
-    
-    return variables
-
-
-async def analyze_plc(url: str) -> None:
-    """
-    Analyse un serveur OPCUA et affiche ses variables.
-    
-    Args:
-        url: URL du serveur OPCUA
-    """
-    print("=" * 60)
-    print(f"  ANALYSE DU PLC: {url}")
-    print("=" * 60)
-    
+async def analyse(url: str, depth: int, timeout: float) -> int:
+    """Parcourt l'espace d'adressage et affiche le résultat."""
     client = Client(url=url)
-    
     try:
-        # Connexion au serveur
-        print(f"[INFO] Connexion à {url}...")
-        await client.connect()
-        print("[INFO] Connecté avec succès!\n")
-        
-        # Obtenir le node racine
-        root = client.nodes.root
-        objects_node = client.nodes.objects
-        
-        # Afficher les informations du serveur
-        try:
-            server_info = await client.get_endpoints()
-            if server_info:
-                print(f"[INFO] Serveur: {server_info[0].Server.ApplicationName.Text}")
-                print(f"[INFO] URI: {server_info[0].Server.ApplicationUri}\n")
-        except Exception:
-            pass
-        
-        print(f"{'Variable':<40} | {'Accès':<18} | {'Valeur'}")
-        print("-" * 75)
-        
-        # Parcourir les variables
-        variables = await browse_variables(objects_node, client)
-        
-        for var_name, var_access, var_value in variables:
-            print(f"{var_name:<40} | {var_access:<18} | {var_value}")
-        
+        await asyncio.wait_for(client.connect(), timeout)
+    except Exception as exc:
+        logger.error(f"Connexion impossible : {type(exc).__name__}: {exc}")
+        return 1
+
+    try:
+        logger.info(f"Connecté à {url}")
+        identity = await server_array(client)
+        if identity:
+            logger.info(f"  applicationUri : {identity}")
+        logger.info(f"  namespaces     : {await client.get_namespace_array()}")
+
+        # On parcourt puis on retrouve chaque nœud par browse name : c'est le
+        # seul moyen d'en lire le niveau d'accès sans identifiant codé en dur.
+        rows = await asyncio.wait_for(
+            list_children(client.nodes.objects, depth, skip_roots=STANDARD_TREES), timeout
+        )
+        variables = [row for row in rows if row[1] is not None]
         if not variables:
-            print("Aucune variable trouvée.")
-        
-        print("-" * 75)
-        print(f"\n[INFO] Analyse terminée.")
-        
-    except Exception as e:
-        print(f"[ERREUR] Impossible de se connecter au serveur: {e}")
-        #import traceback
-        #traceback.print_exc()
-        #sys.exit(1)
-        
+            logger.warning(
+                "Aucune variable lisible. L'espace d'adressage est-il vide, "
+                "ou le parcours trop court ? (--depth)"
+            )
+            return 1
+
+        logger.info("")
+        logger.info(f"{'Variable':40s} | {'Accès':16s} | Valeur")
+        logger.info("-" * 74)
+        for path, _ in variables:
+            node = await find_by_path(client.nodes.objects, path)
+            if node is None:
+                continue
+            level = await access_label(node)
+            value = await node.get_value()
+            logger.info(f"{path:40s} | {level:16s} | {format_value(value)}")
+        logger.info("-" * 74)
+        logger.info(f"{len(variables)} variable(s) affichée(s)")
+
+    except Exception as exc:
+        logger.error(f"Erreur : {type(exc).__name__}: {exc}")
+        return 1
     finally:
         try:
             await client.disconnect()
-            print("[INFO] Déconnecté.")
         except Exception:
             pass
 
+    return 0
 
-def main() -> None:
-    """Point d'entrée principal."""
-    args = parse_args()
-    asyncio.run(analyze_plc(args.url))
+
+async def main(argv=None) -> int:
+    setup()
+    args = parse_args(argv)
+    logger.info(banner("Analyse de l'espace d'adressage"))
+    logger.info(f"  {args.url}\n")
+    return await analyse(args.url, args.depth, args.timeout)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(asyncio.run(main()))

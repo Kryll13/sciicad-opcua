@@ -1,0 +1,40 @@
+# Configuration du Local Discovery Server SCIICAD
+#
+# Tous les réglages ont un défaut utilisable : ce fichier est optionnel.
+
+server:
+  # Adresse d'écoute. 0.0.0.0 = toutes les interfaces : c'est le choix sûr,
+  # le serveur démarre même si la résolution DNS du hostname ne correspond à
+  # aucune interface locale.
+  bind_address: "0.0.0.0"
+  port: 4840
+
+  # Hôte annoncé aux clients dans FindServers / GetEndpoints.
+  # null = hostname de la machine. Sur une VM, préférer une IP fixe si le
+  # hostname n'est pas résolvable par les clients.
+  advertise_host: null
+
+  application_name: "SCIICAD LDS"
+  application_uri: "urn:SCIICAD:lds"
+  product_uri: "urn:SCIICAD:product:lds"
+  manufacturer_name: "SCIICAD"
+  software_version: "1.0"
+
+discovery:
+  # Durée de vie d'une entrée sans renouvellement.
+  # La norme OPC UA impose un ré-enregistrement au plus tard toutes les
+  # 10 minutes ; 300 s laisse une marge confortable puisque les PLC du projet
+  # ré-enregistrent toutes les 60 s.
+  entry_ttl_seconds: 300
+
+  # Fréquence du balayage des entrées périmées.
+  sweep_interval_seconds: 60
+
+  # Service absent du serveur asyncua, activé par l'extension du projet.
+  find_servers_on_network: true
+
+database:
+  enabled: true
+  path: "lds.db"
+  # Journal des enregistrements, expirations et restaurations.
+  event_log: true

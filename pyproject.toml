@@ -1,7 +1,7 @@
 [project]
 name = "sciicad-opcua"
 version = "0.1.0"
-description = "Add your description here"
+description = "Simulateurs industriels OPC UA et serveur de découverte pour le projet SCIICAD"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -12,3 +12,15 @@ dependencies = [
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.48",
 ]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+# Les simulateurs sont des scripts lancés depuis leur propre dossier
+# (thermo-plc/, protect-plc/) : ces noms contiennent un tiret et ne sont pas
+# des noms de paquet Python valides. Seuls les vrais paquets sont donc
+# empaquetés, et ils sont listés explicitement car setuptools ne peut pas les
+# découvrir seul : la racine contient des répertoires non conventionnels.
+[tool.setuptools]
+packages = ["lds", "sciicad"]

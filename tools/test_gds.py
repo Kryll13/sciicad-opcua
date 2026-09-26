@@ -6,6 +6,7 @@ Teste toutes les opérations disponibles sur le serveur GDS.
 Ce fichier est autonome et ne dépend pas des autres fichiers du projet.
 """
 
+import argparse
 import asyncio
 import json
 import sys
@@ -13,6 +14,8 @@ from typing import Optional, List, Dict, Any
 
 from asyncua import Client, ua
 from loguru import logger
+
+from sciicad.console import banner, setup
 
 
 # ============================================================================
@@ -52,85 +55,6 @@ class OPCUAClient:
             except Exception as e:
                 logger.error(f"Erreur lors de la déconnexion: {e}")
     
-    async def read_variable(self, node_id: str):
-        """Lit la valeur d'une variable"""
-        try:
-            node = self.client.get_node(node_id)
-            value = await node.read_value()
-            return value
-        except Exception as e:
-            logger.error(f"Erreur de lecture: {e}")
-            raise
-    
-    async def write_variable(self, node_id: str, value: Any):
-        """Écrit une valeur dans une variable"""
-        try:
-            node = self.client.get_node(node_id)
-            await node.write_value(value)
-            logger.info(f"Valeur écrite: {node_id} = {value}")
-        except Exception as e:
-            logger.error(f"Erreur d'écriture: {e}")
-            raise
-    
-    async def browse(self, node_id: str = "i=85") -> List[Dict[str, Any]]:
-        """Parcourt les nœuds enfants."""
-        try:
-            node = self.client.get_node(node_id)
-            children = []
-            
-            for child in await node.get_children():
-                child_info = {
-                    "id": child.nodeid.to_string(),
-                    "name": (await child.read_browse_name()).Name,
-                    "type": str(await child.read_node_class())
-                }
-                children.append(child_info)
-            
-            return children
-        except Exception as e:
-            logger.error(f"Erreur lors du parcours: {e}")
-            raise
-    
-    async def call_method(self, object_id: str, method_id: str, *args) -> Any:
-        """Appelle une méthode du serveur."""
-        try:
-            obj = self.client.get_node(object_id)
-            method = self.client.get_node(method_id)
-            
-            result = await obj.call_method(method, *args)
-            logger.info(f"Méthode appelée: {method_id}")
-            
-            return result
-        except Exception as e:
-            logger.error(f"Erreur lors de l'appel: {e}")
-            raise
-    
-    async def subscribe(self, node_id: str, callback):
-        """S'abonne aux changements d'une variable."""
-        try:
-            node = self.client.get_node(node_id)
-            
-            class SubHandler:
-                def __init__(self, cb):
-                    self.cb = cb
-                
-                def datachange_notification(self, node, val, data):
-                    self.cb(node, val)
-            
-            handler = SubHandler(callback)
-            sub = await self.client.create_subscription(100, handler)
-            await sub.subscribe_data_change(node)
-            
-            logger.info(f"Abonnement créé pour {node_id}")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'abonnement: {e}")
-            raise
-
-
-# ============================================================================
-# GDSClient - Client spécialisé pour les serveurs Global Discovery Server
-# ============================================================================
-
 class GDSClient(OPCUAClient):
     """Client spécialisé pour les serveurs Global Discovery Server"""
     
@@ -335,7 +259,7 @@ class GDSClient(OPCUAClient):
                 else:
                     request_id = str(request_id_raw)
                 logger.info(f"Certificate request created: {request_id}")
-                return {"requestId": request_id, "status": "Pending"}
+                return {"request_id": request_id, "status": "Pending"}
             return None
             
         except Exception as e:
@@ -764,36 +688,70 @@ async def test_phase3_pull_certificate(client):
     print("\n[OK] Phase 3 - Pull Certificate Management testés avec succès")
 
 
-async def main():
-    """Test complet du client GDS"""
-    print("=" * 60)
-    print("TEST COMPLET DU CLIENT GDS")
-    print("Phases 1, 2 et 3")
-    print("=" * 60)
-    
-    client = GDSClient("opc.tcp://localhost:4840")
-    
+def parse_args(argv=None):
+    """Analyse les arguments de la ligne de commande."""
+    parser = argparse.ArgumentParser(
+        description="Test du Global Discovery Server SCIICAD (phases 1 à 3)",
+    )
+    parser.add_argument(
+        "--url", default="opc.tcp://localhost:4840",
+        help="URL du GDS (défaut : opc.tcp://localhost:4840)",
+    )
+    parser.add_argument(
+        "--phase", choices=("1", "2", "3", "all"), default="all",
+        help="phase à tester (défaut : all)",
+    )
+    parser.add_argument(
+        "--username", default=None, help="nom d'utilisateur (anonyme par défaut)",
+    )
+    parser.add_argument(
+        "--password", default=None, help="mot de passe associé",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv=None) -> int:
+    """Enchaîne les phases de test et retourne un code de sortie."""
+    args = parse_args(argv)
+    setup()
+
+    client = GDSClient(args.url, username=args.username, password=args.password)
     try:
         await client.connect()
-        print(f"\nConnecté au GDS: opc.tcp://localhost:4840")
-        
-        # Tester toutes les phases
-        await test_phase1_core_methods(client)
-        await test_phase2_certificate_management(client)
-        await test_phase3_pull_certificate(client)
-        
-        print("\n" + "=" * 60)
-        print("TOUS LES TESTS RÉUSSIS!")
-        print("=" * 60)
-        
-    except Exception as e:
-        print(f"\n[ERREUR] {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception as exc:
+        logger.error(f"Connexion au GDS impossible : {type(exc).__name__}: {exc}")
+        return 1
+
+    phases = {
+        "1": test_phase1_core_methods,
+        "2": test_phase2_certificate_management,
+        "3": test_phase3_pull_certificate,
+    }
+    selected = list(phases) if args.phase == "all" else [args.phase]
+
+    failures = 0
+    try:
+        for key in selected:
+            try:
+                await phases[key](client)
+            except Exception as exc:
+                # Une phase en échec ne doit pas empêcher les suivantes d'être
+                # tentées : le rapport doit être complet.
+                logger.error(f"Phase {key} en échec : {type(exc).__name__}: {exc}")
+                failures += 1
     finally:
-        await client.disconnect()
-        print("\nDéconnecté du GDS")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    logger.info(banner("Bilan"))
+    if failures:
+        logger.info(f"{failures} phase(s) en échec.")
+        return 1
+    logger.info("Toutes les phases ont été exécutées.")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))
