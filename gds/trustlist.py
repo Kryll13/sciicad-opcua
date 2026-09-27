@@ -44,10 +44,13 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from asyncua import ua
 from asyncua.ua.ua_binary import from_binary, to_binary
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from loguru import logger
 
 #: Masques de ``TrustListMasks`` (i=12552), qui désignent les quatre listes.
@@ -108,6 +111,140 @@ def thumbprint(der: bytes) -> str:
     signature du canal sécurisé.
     """
     return hashlib.sha1(der).hexdigest().lower()
+
+
+#: Extensions reconnues pour un certificat hors bande. Le PEM est le format de
+#:openssl par défaut et ce que produit ``crypto_opcua`` ; le DER et le ``.crt``
+#: sont acceptés parce qu'un déploiement peut empêcher l'usage d'OpenSSL, et
+#: refuser une ancre parce qu'elle est valide mais dans un autre suffixe serait
+#: un échec de mise en service, pas un avertissement utile.
+_CERTIFICATE_SUFFIXES = (".pem", ".der", ".crt", ".cer")
+
+
+def _split_certificates(payload: bytes) -> list[bytes]:
+    """Certificats DER contenus dans un PEM enchaîné ou un DER unique.
+
+    On ne cherche pas le texte ``BEGIN CERTIFICATE`` mais on essaie le DER
+    d'abord : c'est plus court, et un fichier DER n'a rien à chercher. Ensuite
+    chaque bloc PEM est décodé puis **revalidé** par la pile — un bloc
+    ``BEGIN CERTIFICATE`` suivi d'octets arbitraires produirait sinon des
+    données non-certificats qui échoueraient plus tard, loin de sa source, et
+    avec un message qui ne nommerait pas le fichier fautif.
+    """
+    try:
+        x509.load_der_x509_certificate(payload)
+        return [payload]
+    except Exception:
+        pass
+    certificates: list[bytes] = []
+    marker = b"-----BEGIN CERTIFICATE-----"
+    end = b"-----END CERTIFICATE-----"
+    remainder = payload
+    while marker in remainder:
+        head, _, remainder = remainder.partition(marker)
+        body, found, remainder = remainder.partition(end)
+        if not found:
+            break
+        try:
+            certificates.append(
+                x509.load_pem_x509_certificate(marker + body + end).public_bytes(
+                    serialization.Encoding.DER
+                )
+            )
+        except Exception:
+            logger.warning("Bloc PEM illisible dans un certificat de confiance")
+    return certificates
+
+
+def load_trusted_certificates(
+    group: "CertificateGroup",
+    paths: list[str],
+    is_trusted: bool = True,
+) -> list[str]:
+    """Charge des certificats de confiance dans ``group``, hors bande.
+
+    Part 12 §7.1 : *« Clients shall only connect to a CertificateManager which
+    the Client has been configured to trust. This may require an out of band
+    configuration step which is completed prior to starting the manual
+    onboarding process. »* La norme ne définit aucun amorçage en bande ; cette
+    fonction est l'endroit où le déploiement pose son ancre de confiance.
+
+    Un chemin peut désigner un fichier ou un dossier. Un dossier est développé
+    sur les extensions de :data:`_CERTIFICATE_SUFFIXES`, ce qui permet de
+    pointer un seul répertoire de certificats publics sans énumérer les quatre
+    applications qu'il contient.
+
+    Un fichier PEM peut contenir plusieurs certificats enchaînés, ce que produit
+    ``cat`` et ce que produit ``openssl`` avec ``-bundle`` : les charger tous est
+    le comportement attendu, et n'en charger qu'un laisserait une ancre
+    silencieusement absente.
+
+    Ce que fait cette fonction, et ce qu'elle ne fait pas
+    -----------------------------------------------------
+
+    Elle appelle :meth:`CertificateGroup.add`, et **n'exécute aucune validation**.
+    Ce n'est pas un raccourci : la validation de :mod:`gds.certstore` certify
+    qu'un certificat *présenté par le réseau* est conforme, alors qu'ici
+    l'administrateur *décide* que cette clé est de confiance. Faire passer
+    l'ancre par la validation la rendrait dépendante d'elle-même — et elle
+    échouerait, puisque le défaut fermé de §7.8.2.10 refuse un certificat sans
+    CRL, donc refuse précisément celui qui sert d'ancre. Une ancre ne peut pas
+    exiger la preuve de sa propre existence.
+
+    Rend la liste des sources effectivement chargées, et journalise
+    l'inexistant, l'illisible et l'incompatible. Un fichier illisible est
+    **avertissement et non erreur** : une ancre absente doit se voir dans le
+    journal, pas empêcher un serveur de démarrer — sauf si l'administrateur
+    действиait d'elle, auquel cas le silence serait pire. C'est pourquoi le
+    chemin d'erreur est explicite dans la valeur rendue.
+    """
+    loaded: list[str] = []
+    wanted = is_trusted
+    files: list[Path] = []
+    for raw in paths:
+        candidate = Path(raw)
+        if candidate.is_dir():
+            files += sorted(
+                entry
+                for entry in candidate.iterdir()
+                if entry.is_file()
+                and entry.suffix.lower() in _CERTIFICATE_SUFFIXES
+            )
+        elif candidate.is_file():
+            files.append(candidate)
+        else:
+            logger.warning(
+                f"Certificat de confiance introuvable, ignoré : {raw!r}"
+            )
+
+    for path in files:
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            logger.warning(f"Certificat de confiance illisible, ignoré : {path} ({exc})")
+            continue
+
+        certificates = _split_certificates(payload)
+        if not certificates:
+            logger.warning(
+                f"Aucun certificat exploitable dans {path} : ce n'est ni un PEM "
+                f"ni un DER. Ignoré."
+            )
+            continue
+
+        added = 0
+        for der in certificates:
+            try:
+                if group.add(der, is_trusted=wanted):
+                    added += 1
+            except TrustListError as exc:
+                logger.warning(f"Certificat refusé dans {path} : {exc}")
+        if added:
+            loaded.append(str(path))
+            logger.info(
+                f"Ancre de confiance chargée depuis {path} : {added} certificat(s)"
+            )
+    return loaded
 
 
 def encode(masks: int, lists: dict[str, list[bytes]]) -> bytes:

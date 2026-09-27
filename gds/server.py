@@ -32,7 +32,7 @@ from .certificategroup import (
 from .certstore import CertificateStore
 from .config import GDSConfig
 from .serverconfiguration import ServerConfigurationNode
-from .trustlist import CertificateGroup
+from .trustlist import CertificateGroup, load_trusted_certificates
 
 
 class GlobalDiscoveryServer(DiscoveryServer):
@@ -104,6 +104,58 @@ class GlobalDiscoveryServer(DiscoveryServer):
                 f"Groupes de certificats publiés sous {folder.nodeid} "
                 f"(CertificateGroupFolderType i={ua.ObjectIds.CertificateGroupFolderType})"
                 f" : {', '.join(self.certificate_groups)}"
+            )
+        self._load_trust_anchors()
+
+    def _load_trust_anchors(self) -> None:
+        """Pose les ancrages de confiance configurés, Part 12 §7.1.
+
+        L'amorçage est **hors bande** par construction : la norme écrit que le
+        client doit avoir été configuré pour faire confiance au
+        *CertificateManager* avant que l'onboarding ne commence, et ne définit
+        aucun mécanisme en bande. Cette méthode est l'extrémité réseau de cette
+        décision d'administrateur — elle s'exécute au démarrage, sans session et
+        sans validation, ce qui est la seule façon qu'elle ait un sens.
+
+        L'ordre est impératif : après ``_build_certificate_groups``, donc
+        seulement si le groupe visé existe. Un ancrage destiné à un groupe
+        absent est signalé et non redirigé vers un autre groupe — un
+        certificat de confiance placé dans un groupe qui ne correspond pas à sa
+        fonction accepterait silencieusement des présentations qui ne
+        devraient pas l'être.
+        """
+        anchors = self.config.certificates.trusted_certificates
+        if not anchors:
+            return
+        target = self.config.certificates.trusted_certificates_group
+        node = self.certificate_groups.get(target)
+        if node is None:
+            logger.error(
+                f"Ancrages de confiance ignorés : le groupe {target!r} n'est pas "
+                f"rattaché. Groupes disponibles : "
+                f"{', '.join(self.certificate_groups) or '(aucun)'}. "
+                f"Ajoutez {target!r} à certificates.groups, ou corrigez "
+                f"certificates.trusted_certificates_group. Aucun certificat n'est "
+                f"redirigé vers un autre groupe : un ancrage dans le mauvais "
+                f"groupe accepterait des présentations qui ne doivent pas l'être."
+            )
+            return
+        loaded = load_trusted_certificates(node.group, anchors)
+        if not loaded:
+            logger.error(
+                f"Aucun ancrage de confiance n'a pu être chargé depuis "
+                f"{len(anchors)} source(s) déclarée(s). Le GDS démarrera avec une "
+                f"liste de confiance vide et refusera toute présentation de "
+                f"certificat — c'est le comportement attendu quand la liste est "
+                f"vide, mais ici c'est presque certainement une erreur de "
+                f"déploiement."
+            )
+        else:
+            logger.info(
+                f"Ancrages de confiance chargés dans {target!r} : "
+                f"{len(node.group.trusted_certificates)} certificat(s) de "
+                f"confiance, {len(node.group.issuer_certificates)} émetteur(s). "
+                f"Sources : {', '.join(loaded)}"
             )
 
     def certificate_group(self, name: str) -> Optional[CertificateGroup]:

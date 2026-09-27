@@ -74,6 +74,45 @@ certificates:
   # identite le GDS doit annoncer.
   hostnames: []
 
+  # ANCRAGE DE CONFIANCE — Part 12 §7.1
+  #
+  # La norme ne definit aucun amorcage en bande. §7.1 exige l'inverse :
+  # « Clients shall only connect to a CertificateManager which the Client has
+  # been configured to trust. This may require an out of band configuration step
+  # which is completed prior to starting the manual onboarding process. »
+  #
+  # Ce champ est donc l'ancre du deploiement, posee hors bande et avant tout
+  # demarrage. Il se remplit par tools/bootstrap_certificates.py, qui produit
+  # les certificats constructeurs des quatre roles et depose ici leurs
+  # COPIES PUBLIQUES — sans les cles privees. Un chemin de fichier est accepte
+  # aussi bien qu'un dossier, developpe alors sur *.pem, *.der et *.crt.
+  #
+  # Ces certificats entrent dans la liste SANS passer la validation de
+  # gds/certstore.py, et c'est deliberé : la validation certifie ce qu'un
+  # certificat presente par le reseau respecte le profil, alors qu'ici
+  # l'administrateur DECIDE que cette cle est de confiance. La faire passer par
+  # la validation la rendrait dependante d'elle-meme — et elle echouerait, car
+  # le defaut ferme de §7.8.2.10 refuse un certificat sans CRL, donc refuse
+  # precisement celui qui sert d'ancre. Une ancre ne peut pas exiger la preuve
+  # de sa propre existence.
+  #
+  # Ces ancres n'ont pas de CRL, ce qui est coherent tant qu'aucune autorite de
+  # certification n'est en service : le defaut ferme de §7.8.2.10 s'applique a la
+  # VALIDATION des certificats presentes par le reseau, pas a la constitution
+  # initiale de la liste.
+  trusted_certificates:
+    - pki/trusted
+
+  # Groupe destinataire. Les CertificateTypes d'un groupe disent a quoi sert ce
+  # qu'il contient : un certificat d'application n'a de sens que dans
+  # DefaultApplicationGroup. Le mettre ailleurs rendrait la liste incoherent
+  # avec sa propre declaration.
+  #
+  # Un ancrage vise un groupe non attache est signale et IGNORE, jamais
+  # redirige : place dans le mauvais groupe, il accepterait des presentations qui
+  # ne doivent pas l'etre.
+  trusted_certificates_group: DefaultApplicationGroup
+
 audit:
   # Evenements d'audit OPC UA (Part 12 7.8.2.13 et 7.10.27). Un client abonne
   # recoit TrustListUpdatedAuditEventType quand la liste de confiance change, et

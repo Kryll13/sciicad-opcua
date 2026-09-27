@@ -29,6 +29,27 @@ connaissances du modèle, banc de test — vit dans `sciicad/`.
 
 ## Outils de contrôle
 
+### `check_docs.py` — vérification automatique de la documentation
+
+```bash
+uv run tools/check_docs.py
+```
+
+Quatre familles d'anomalies, toutes vérifiables sans intervention : **options**
+citées qui n'existent plus dans le `--help` du script visé, **liens** relatifs
+morts, **ancres** ne correspondant à aucun titre, **chemins** de fichiers cités
+en clair et absents. Code de sortie non nul si une seule existe.
+
+> Le calcul des ancres mérite l'attention : GitHub met en minuscules,
+> **supprime** ce qui n'est ni lettre, ni chiffre, ni espace, ni tiret, puis
+> remplace les espaces par des tirets. Donc `§` disparaît — il ne devient pas un
+> tiret — et les accents sont **conservés**, GitHub ne translittère pas.
+>
+> Un vérificateur qui convertit `§` en `-`, ou qui retire les accents, déclare
+> morte une ancre parfaitement valide tout en manquant les vraies. C'est ce qui
+> est arrivé ici : trois ancres perdues depuis un certain temps n'ont été
+> trouvées qu'après correction de la règle.
+
 ### `ihm_action.py` — contrôle du thermostat
 
 Interroge et commande le PLC thermostat (`Heating`, `MaintenanceMode`).
@@ -134,6 +155,47 @@ Le répertoire de sortie est créé s'il n'existe pas, et la clé privée est é
 en `0600` (elle est **non chiffrée**). `--key-size` est borné à 2048..4096 et
 `--validity-days` doit être positif ; toute valeur hors plage est refusée avec
 un code de sortie non nul. Les deux fichiers sont ignorés par git.
+
+Le `keyUsage` produit est conforme à la **Table 50** de la Part 6 : pour une clé
+RSA, `digitalSignature`, `nonRepudiation`, `keyEncipherment` et
+`dataEncipherment`, plus `keyCertSign` puisque le certificat est auto-signé.
+C'est ce qui permet au certificat constructeur d'être sa propre ancre.
+
+### `bootstrap_certificates.py` — amorçage de la confiance, Part 12 §7.1
+
+L'étape hors bande sans laquelle aucun déploiement ne démarre : la norme
+l'exige explicitement, et ne fournit aucun équivalent en bande.
+
+```bash
+uv run tools/bootstrap_certificates.py
+```
+
+Génère les **certificats constructeurs des quatre rôles** — `lds`, `gds`,
+`thermo-plc`, `protect-plc` — et dépose leurs **copies publiques** dans
+`pki/trusted/`. La clé privée reste dans le répertoire du rôle, en `0600` : une
+liste de confiance est lisible par tout client autorisé à la lire, et y mettre
+une clé l'exposerait.
+
+Les URI d'application sont celles que les serveurs annoncent réellement
+(YAML pour le LDS et le GDS, constante de module pour les PLCs). Une URI
+divergente produirait un certificat dont le SAN ne correspond pas à ce que le
+serveur déclare — et le défaut n'apparaîtrait qu'à la première connexion
+sécurisée.
+
+| Option | Effet |
+|---|---|
+| `--host ROLE=HOST` | Nom d'hôte inscrit au SAN, répétable. Le premier est l'identité principale, les suivants des alias. |
+| `--key-size` | bits (défaut 2048) |
+| `--validity-days` | durée de validité (défaut 365) |
+| `--force` | Écrase l'existant, en prévenant que cela invalide toute confiance établie. |
+
+Sans `--force`, un couple déjà présent est conservé : réécrire une clé par-dessus
+une clé en service détruirait le certificat correspondant, qu'aucune liste de
+confiance ne pourrait plus valider.
+
+Rappelle enfin la déclaration à porter dans `gds/gds_config.yaml`. Voir
+[docs/securite.md](securite.md#amorçage-de-la-confiance-part-12-71) pour la
+raison normative.
 
 ## Tests GDS
 
@@ -266,6 +328,47 @@ plutôt que recopiées ; la sévérité est bien 300, celle d'un audit.
 > sur une erreur. Et le `NodeId` d'un nœud **serveur** est un `NumericNodeId`,
 > absent de la table des ExtensionObject : le passer en argument casse la
 > sérialisation sur `KeyError`. Un client normatif n'a jamais ce second cas.
+
+### `selftest_bootstrap.py` — amorçage de confiance (Part 12 §7.1, Part 6 Table 50)
+
+```bash
+uv run tools/selftest_bootstrap.py
+```
+
+Vérifie que l'étape hors bande existe, qu'elle produit des certificats
+**conformes au profil normatif**, et qu'elle aboutit réellement dans la liste de
+confiance du GDS — lue **par le réseau**, depuis un client ordinaire, parce que
+ce qui compte est ce qu'un client peut voir, pas ce que le serveur croit avoir
+chargé.
+
+Vérifié notamment : le profil Table 50 champ par champ ; exactement un URI dans
+le SAN, égal à l'URI d'application ; `cA=FALSE` ; clé privée en `0600` ; aucune
+clé privée dans `pki/trusted/` ; les quatre ancres dans
+`DefaultApplicationGroup` et **nulle part ailleurs** ; les ancres lisibles sur
+le réseau.
+
+**Quatre contrôles négatifs.** Un jeu de tests qui passe ne prouve rien s'il ne
+peut pas échouer. Trois certificats sont conformes à tout sauf à un point, et
+doivent donc être refusés :
+
+- `keyUsage` incomplet pour une clé RSA — les deux bits que l'ancien code
+  exigeait, et lui seul ;
+- `serverAuth` absent de l'EKU ;
+- `keyCertSign` absent sur un auto-signé.
+
+Un quatrième cas, **conforme**, doit passer : sans lui, un refus dû à un autre
+motif passerait pour une preuve.
+
+> Ces contrôles sont construits à partir d'une demande de signature du magasin,
+> et non indépendamment de lui. C'est la condition qui les rend valides : sinon
+> le magasin refuse d'abord pour *clé absente*, avec le **même**
+> `BadCertificateInvalid` que le profil — et le test passerait pour le mauvais
+> motif. La révocation est neutralisée dans ce test, qui isole une seule
+> variable ; elle a le sien, `selftest_revocation.py`.
+
+Contrôle négatif du contrôle négatif : neutraliser `_check_application_profile`
+fait passer les trois refus à `Good`, et l'auto-test échoue. C'est ce qui
+prouve qu'il exerce réellement le contrôle.
 
 ### `selftest_revocation.py` — révocation du GDS (Part 12 §7.8.2.10)
 

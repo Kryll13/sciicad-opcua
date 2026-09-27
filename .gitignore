@@ -26,6 +26,13 @@
 certificates/
 certificate-stores/
 
+# Ancrage de confiance, Part 12 §7.1. Tout ce que contient pki/trusted/ est
+# produit par tools/bootstrap_certificates.py et se régénère ; les clés privées,
+# elles, sont dans les répertoires des rôles, et *.pem les couvre déjà — cette
+# entrée rend la destination visible sans qu'il faille connaître le glob.
+# Ne jamais versionner pki/ : ce serait publier les clés de l'ancrage avec la
+# confiance qu'elles confèrent.
+
 # ============================================================================
 # Bases de données
 # ----------------------------------------------------------------------------

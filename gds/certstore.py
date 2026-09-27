@@ -252,6 +252,99 @@ def _verify_signature(certificate: x509.Certificate, issuer_public_key) -> bool:
     return False
 
 
+def _check_application_profile(certificate: x509.Certificate) -> None:
+    """Vérifie le profil d'un certificat d'application, Part 6 Table 50.
+
+    Cette vérification existait déjà, mais en version faible : elle exigeait
+    ``digitalSignature`` et ``keyEncipherment``, deux bits parmi ceux que la
+    norme impose. La Table 50 est plus exigeante, et plus subtile, car elle
+    **distingue le type de clé** :
+
+    * « For RSA keys, the keyUsage shall include digitalSignature,
+      nonRepudiation, keyEncipherment and dataEncipherment. » — quatre bits.
+    * « For ECC keys, the keyUsage shall include digitalSignature. » — un seul.
+    * « Self-signed Certificates shall also include keyCertSign. »
+    * « For RSA profiles, the extendedKeyUsage shall specify serverAuth for
+      Servers. »
+
+    Exiger les quatre bits à une clé ECC serait un refus à tort : la norme les
+    exclut explicitement, et le chiffrement ECC est une voie aujourd'hui
+    publiée — ``EccApplicationCertificateType`` i=23537 est dans le NodeIds
+    officiel. Inversement, n'exiger que deux bits laissait passer un certificat
+    RSA dont il manque la moitié des usages — ce qui est précisément ce que
+    produisait ``crypto_opcua.py`` avant que la Table 50 ne soit lue.
+
+    Le message nomme les bits manquants. « KeyUsage insuffisant » ne dit pas
+    lequel, et un opérateur ne peut pas corriger ce qu'on ne lui nomme pas.
+    """
+    try:
+        constraints = certificate.extensions.get_extension_for_class(
+            x509.BasicConstraints
+        ).value
+    except x509.ExtensionNotFound as exc:
+        raise _bad_certificate("extension BasicConstraints absente") from exc
+    if constraints.ca:
+        # La Table 50 autorise cA=TRUE « to ensure backward interoperability »
+        # quand la vérification de révocation est active, et dit d'écrire un
+        # avertissement. Elle ne l'autorise pas quand elle est inactive.
+        if not _has(DEFAULT_VALIDATION_OPTIONS, "CheckRevocationStatusOffline"):
+            raise _bad_certificate(
+                "le drapeau cA est positionné alors que la vérification de "
+                "révocation est inactive : la Table 50 ne l'admet pas dans ce cas"
+            )
+        logger.warning(
+            "Certificat d'application avec cA=TRUE, accepté par compatibilité "
+            "descendante (Table 50) : la validation de révocation est active."
+        )
+
+    try:
+        key_usage = certificate.extensions.get_extension_for_class(x509.KeyUsage).value
+    except x509.ExtensionNotFound as exc:
+        raise _bad_certificate("extension KeyUsage absente") from exc
+
+    is_rsa = isinstance(certificate.public_key(), rsa.RSAPublicKey)
+    if is_rsa:
+        required = {
+            "digitalSignature": key_usage.digital_signature,
+            "nonRepudiation": key_usage.content_commitment,
+            "keyEncipherment": key_usage.key_encipherment,
+            "dataEncipherment": key_usage.data_encipherment,
+        }
+        absent = [name for name, present in required.items() if not present]
+        if absent:
+            raise _bad_certificate(
+                f"KeyUsage incomplet pour un certificat RSA (Table 50) : "
+                f"{', '.join(absent)} absent(s)"
+            )
+    elif not key_usage.digital_signature:
+        raise _bad_certificate(
+            "KeyUsage incomplet pour un certificat non-RSA (Table 50) : "
+            "digitalSignature absent"
+        )
+
+    if certificate.issuer == certificate.subject and not key_usage.key_cert_sign:
+        raise _bad_certificate(
+            "certificat auto-signé sans keyCertSign dans KeyUsage, que la "
+            "Table 50 exige pour tout certificat auto-signé"
+        )
+
+    if is_rsa:
+        try:
+            eku = certificate.extensions.get_extension_for_class(
+                x509.ExtendedKeyUsage
+            ).value
+        except x509.ExtensionNotFound as exc:
+            raise _bad_certificate(
+                "extension ExtendedKeyUsage absente : la Table 50 impose "
+                "serverAuth pour un profil RSA servant de serveur"
+            ) from exc
+        if ExtendedKeyUsageOID.SERVER_AUTH not in eku:
+            raise _bad_certificate(
+                "ExtendedKeyUsage ne contient pas serverAuth, que la Table 50 "
+                "impose pour un profil RSA"
+            )
+
+
 def _has(flags: int, flag_name: str) -> bool:
     """Vrai si le drapeau nommé est posé dans l'ensemble de bits.
 
@@ -636,14 +729,7 @@ class CertificateStore:
         except x509.ExtensionNotFound as exc:
             raise _bad_certificate("extension BasicConstraints absente") from exc
 
-        try:
-            key_usage = certificate.extensions.get_extension_for_class(x509.KeyUsage).value
-        except x509.ExtensionNotFound as exc:
-            raise _bad_certificate("extension KeyUsage absente") from exc
-        if not (key_usage.digital_signature and key_usage.key_encipherment):
-            raise _bad_certificate(
-                "KeyUsage insuffisant pour un certificat applicatif OPC UA"
-            )
+        _check_application_profile(certificate)
 
         if not _has(flags, "SuppressHostNameInvalid") and not self._has_application_uri(
             certificate

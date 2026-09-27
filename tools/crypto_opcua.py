@@ -92,13 +92,27 @@ def generate(
             x509.BasicConstraints(ca=False, path_length=None), critical=True
         )
         .add_extension(
+            # Table 50 de la Part 6, « keyUsage » : « For RSA keys, the
+            # keyUsage shall include digitalSignature, nonRepudiation,
+            # keyEncipherment and dataEncipherment », et « Self-signed
+            # Certificates shall also include keyCertSign ».
+            #
+            # Les trois bits manquants ne sont pas un détail : un validateur
+            # conforme rejette le certificat, et le message qu'il rend parle
+            # d'une contrainte d'usage — jamais de l'absence de chaîne. C'est
+            # le genre de faute qui ne se voit qu'en production.
+            #
+            # keyCertSign sur un certificat d'application auto-signé est
+            # paradoxal en apparence, mais exigé : c'est ce qui permet à ce
+            # certificat d'être sa propre ancre, ce qu'est nécessairement un
+            # certificat constructeur. La Table 50 le dit sans ambiguïté.
             x509.KeyUsage(
                 digital_signature=True,
-                content_commitment=False,
+                content_commitment=True,   # nonRepudiation
                 key_encipherment=True,
-                data_encipherment=False,
+                data_encipherment=True,
                 key_agreement=False,
-                key_cert_sign=False,
+                key_cert_sign=True,        # auto-signé : ancre de lui-même
                 crl_sign=False,
                 encipher_only=False,
                 decipher_only=False,
@@ -106,6 +120,11 @@ def generate(
             critical=True,
         )
         .add_extension(
+            # Table 50 : « For RSA profiles, the extendedKeyUsage shall specify
+            # serverAuth for Servers ». Le clientAuth pour un serveur est un
+            # « should », et il n'est pas posé ici : un certificat d'application
+            # n'est pas utilisé comme jeton d'identité utilisateur, ce qui est
+            # le rôle du DefaultUserTokenGroup.
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
         )
         .add_extension(

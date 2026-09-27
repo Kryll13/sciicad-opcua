@@ -47,13 +47,113 @@ copier sur un support partagé. Les deux fichiers sont ignorés par `.gitignore`
 `--key-size` est borné à 2048..4096 bits et `--validity-days` doit être
 positif ; toute autre valeur est refusée.
 
-Le certificat inclut les extensions OPC UA requises : Subject Alternative
-Name (URI d'application, DNS, IP, 127.0.0.1), KeyUsage, ExtendedKeyUsage
-(serverAuth), BasicConstraints (non-CA).
+Le certificat est conforme au profil de la **Table 50** de la Part 6 : pour une
+clé RSA, `keyUsage` porte `digitalSignature`, `nonRepudiation`, `keyEncipherment`
+et `dataEncipherment`, plus `keyCertSign` puisque le certificat est auto-signé ;
+`extendedKeyUsage` porte `serverAuth` ; `basicConstraints` porte `cA=FALSE` ; le
+SAN contient **exactement un** URI, égal à l'URI d'application.
+
+> Ce profil n'est pas vérifié par la bibliothèque qui écrit le certificat :
+> `cryptography` produit ce qu'on lui demande sans le confronter à une norme. Un
+> écart ne se découvre qu'auprès d'un validateur — ou jamais. Le GDS, lui, le
+> vérifie : `gds/certstore.py` contrôle les quatre bits, `serverAuth`, et
+> `keyCertSign` sur un auto-signé, et nomme le bit manquant quand il refuse.
 
 > Si les fichiers sont absents, le serveur démarre quand même (warning) avec
 > `NoSecurity` uniquement. Vérifier ces fichiers sur un PLC distant pour
 > activer le chiffrement.
+
+## Amorçage de la confiance (Part 12 §7.1)
+
+La Part 12 ne définit **aucun** amorçage en bande. §7.1 exige l'inverse :
+
+> « Clients shall only connect to a CertificateManager which the Client has been
+> configured to trust. This may require an out of band configuration step which
+> is completed prior to starting the manual onboarding process. »
+
+La confiance se pose donc **hors bande, avant le démarrage**. C'est la seule
+lecture possible, et la seule qui marche.
+
+### Pourquoi pas d'autorité de certification interne
+
+Parce que la norme ne lui laisse pas de place, et qu'il faut le voir plutôt que
+le contourner :
+
+| Question | Réponse |
+|---|---|
+| Un rôle « Certificate Authority » existe-t-il ? | **Non.** Recherche sur `CertificateAuthorit` dans le `NodeIds.csv` officiel : **zéro** nœud. |
+| Que produit `CreateSigningRequest` ? | Une PKCS #10 — 3.1.3 : *« used to request a new Certificate **from a Certificate Authority** »*. La CA est extérieure par définition. |
+| `StartSigning` / `CreateSelfSignedCertificate` ? | Absents du NodeSet courant, comme `CertificateDirectoryType` au §7.9. |
+
+Le GDS est donc un **CertificateManager** (§7.10), pas une CA. Il prépare une
+demande, conserve la clé, installe le certificat signé par une autorité
+**extérieure**. Le rôle `StartSigning`/`StopSigning` du modèle 1.04 a disparu.
+
+### La séquence
+
+| Étape | Action | Canal |
+|---|---|---|
+| 1 | Générer les 4 certificats constructeurs + l'ancre publique | hors bande |
+| 2 | Déclarer l'ancre dans `gds/gds_config.yaml` | hors bande |
+| 3 | Les 4 applications démarrent avec leur certificat constructeur | — |
+| 4 | Renouvellement : `CreateSigningRequest` → CA externe → `UpdateCertificate` | chiffré |
+
+L'étape 3 ne demande que le certificat constructeur **du GDS**, produit à
+l'étape 1 : il n'y a pas de circularité. La CA n'entre qu'à l'étape 4.
+
+Le certificat constructeur **est** l'ancre. Il n'a pas à être remplacé pour
+devenir inutile — il est ce à quoi l'on fait confiance au départ.
+
+### Mise en œuvre
+
+```bash
+uv run tools/bootstrap_certificates.py
+```
+
+Produit, pour `lds`, `gds`, `thermo-plc` et `protect-plc`, un couple
+`server_certificate.pem` + `server_private_key.pem` (clé en `0600`), et dépose
+les **copies publiques** dans `pki/trusted/`.
+
+La séparation est le point : la clé reste dans le répertoire du rôle, l'ancre
+part sans elle. Une liste de confiance est lisible par tout client autorisé à la
+lire ; y déposer une clé privée la rendrait lisible aussi.
+
+Puis, dans `gds/gds_config.yaml` :
+
+```yaml
+certificates:
+  trusted_certificates:
+    - pki/trusted
+  trusted_certificates_group: DefaultApplicationGroup
+```
+
+Ces certificats entrent dans la liste **sans** passer la validation de
+`gds/certstore.py`, et c'est délibéré. La validation certifie ce qu'un
+certificat présenté par le réseau respecte le profil ; ici, l'administrateur
+*décide* que cette clé est de confiance. La faire passer par la validation la
+rendrait dépendante d'elle-même — et elle échouerait, car le défaut fermé de
+§7.8.2.10 refuse un certificat sans CRL, donc refuse précisément celui qui sert
+d'ancre. **Une ancre ne peut pas exiger la preuve de sa propre existence.**
+
+Un ancrage visant un groupe non rattaché est signalé et **ignoré, jamais
+redirigé** : placé dans le mauvais groupe, il accepterait des présentations qui
+ne doivent pas l'être.
+
+### Ce que le canal sécurisé ne garantit pas
+
+asyncua **ne valide pas la chaîne du certificat** côté client.
+`security_policies.py` ne fait que `verify(data, signature)` — prouver la
+possession de la clé privée. Il n'y a ni `validate_cert`, ni liste de
+confiance.
+
+Conséquence, à connaître avant de dire « le déploiement est sécurisé » :
+
+- `SignAndEncrypt` est **réel** : chiffrement et authentification des messages.
+- L'**identité** n'est pas vérifiée. Un attaquant détenant son propre couple de
+  clés serait accepté.
+
+La validation d'identité doit venir du code du projet. Le GDS sait déjà le
+faire ; c'est le côté client qui reste à écrire.
 
 ## Global Discovery Server — couche certificats, non exposée
 
@@ -80,7 +180,7 @@ listes de confiance par `Open`/`Read`/`Write`/`AddCertificate`.
 **Le rôle de *CertificateManager* l'est aussi** (§7.10, modèle *Push*) : l'objet
 `ServerConfiguration` est publié au NodeId normatif i=12637, et
 `CreateSigningRequest`, `UpdateCertificate` et `GetRejectedList` y sont câblées.
-Voir [`serveurs.md`](serveurs.md#role-certificatemanager-part-12-710).
+Voir [`serveurs.md`](serveurs.md#rôle-certificatemanager-part-12-710).
 
 > **Le GDS n'est pas une autorité de certification et n'en tient pas le rôle.**
 > Il prépare une demande de signature et installe le certificat *signé par une
@@ -95,7 +195,7 @@ Voir [`serveurs.md`](serveurs.md#role-certificatemanager-part-12-710).
 > n'est donc pas une référence manquante mais un choix de déploiement. Tant
 > qu'il n'est pas fait, toute session — y compris anonyme — peut écrire dans
 > les listes de confiance et appeler `UpdateCertificate`. Voir
-> [`serveurs.md`](serveurs.md#controle-dacces-non-implante-et-ce-nest-pas-une-reference-manquante).
+> [`serveurs.md`](serveurs.md#contrôle-daccès-non-implanté-et-ce-nest-pas-une-référence-manquante).
 
 La validation d'un certificat entrant applique le processus de la Part 4 et
 n'accepte que si la chaîne de signature remonte à un certificat de confiance du
@@ -113,7 +213,7 @@ sert à présenter des candidats à approuver, pas un journal d'erreurs.
 Le modèle *Pull* d'autorité de certification (§7.9, `CertificateDirectoryType`)
 n'est **pas** implémenté, et ne peut pas l'être conformément : ses NodeIds ne
 sont pas publiés par la Fondation OPC. Voir
-[`serveurs.md`](serveurs.md#gdsgds_serverpy-prototype-non-expose).
+[`serveurs.md`](serveurs.md#gdsgds_serverpy-prototype-non-exposé).
 
 Ce qui reste à faire : la distribution des CRL, et le modèle transactionnel du
 §7.10.

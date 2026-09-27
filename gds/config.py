@@ -63,6 +63,40 @@ class CertificatesConfig(BaseModel):
     #: identité le GDS doit annoncer.
     hostnames: list[str] = Field(default_factory=list)
 
+    #: Certificats de confiance amorcés **hors bande**, Part 12 §7.1.
+    #:
+    #: La norme ne définit aucun amorçage en bande. §7.1 l'exige au contraire :
+    #: « Clients shall only connect to a CertificateManager which the Client has
+    #: been configured to trust. This may require an out of band configuration
+    #: step which is completed prior to starting the manual onboarding process. »
+    #:
+    #: C'est donc ici que se joue l'ancre de confiance du déploiement, et nulle
+    #: part ailleurs. Un chemin, un dossier, ou les deux ; un dossier est
+    #: développé sur ``*.pem``, ``*.der`` et ``*.crt``.
+    #:
+    #: Ces certificats entrent par :meth:`CertificateGroup.add`, **sans** passer
+    #: la validation de :mod:`gds.certstore` — et c'est délibéré, pas une
+    #: commodité. La validation certifie qu'un certificat présenté par le réseau
+    #: est conforme ; ici, c'est l'administrateur qui décide, hors bande, que
+    #: cette clé est de confiance. Faire passer l'ancre par la validation
+    #: rendrait l'ancre de confiance dépendante d'elle-même. Concrètement, la
+    #: validation échouerait d'ailleurs : avec le défaut fermé de §7.8.2.10, un
+    #: certificat constructeur sans CRL associée a un état de révocation
+    #: inconnu, donc refusé. Une ancre ne peut pas exiger la preuve de sa
+    #: propre existence.
+    #:
+    #: Ces fichiers ne doivent contenir que des certificats publics. Une clé
+    #: privée dans une liste de confiance est lisible par tout client autorisé à
+    #: lire la liste.
+    trusted_certificates: list[str] = Field(default_factory=list)
+
+    #: Groupe destinataire des certificats amorcés ci-dessus. Les
+    #: ``CertificateType`` d'un groupe désignent à quoi sert le certificat ;
+    #: un certificat d'application n'a de sens que dans
+    #: ``DefaultApplicationGroup``. Y mettre un certificat d'utilisateur ou de
+    #: HTTPS rendrait la liste incohérente avec son propre ``CertificateTypes``.
+    trusted_certificates_group: str = "DefaultApplicationGroup"
+
 
 class AuditConfig(BaseModel):
     """Événements d'audit OPC UA, Part 12 §7.8.2.13 et §7.10.27.
