@@ -5,12 +5,30 @@ confiance : ce sont des méthodes d'un objet. Le GDS doit donc publier
 l'arborescence, avec ses NodeIds normatifs, et brancher des gestionnaires qui
 appellent la logique métier.
 
-asyncua fournit déjà l'``ObjectType`` ``CertificateGroupType`` (i=12555) dans son
-espace d'adressage standard, avec les dix méthodes ``TrustList``. Il suffit de
-l'instancier : l'arborescence complète est générée, et les méthodes sont
-déclarées ``Executable``. Elles n'ont cependant aucun gestionnaire, donc un
-appel client renverrait ``BadNothingToDo`` ; ce module les recrée avec les
-nôtres, sous le même NodeId.
+Où publier, et pourquoi cela importe
+-----------------------------------
+
+Un ``CertificateGroupType`` ne vit pas n'importe où. §7.8.3.3 décrit le
+dossier qui l'organise, et §7.9.2 place ce dossier sous l'objet de
+configuration du serveur. L'arborescence normative est donc :
+
+    Server
+     └─ ServerConfiguration          (ServerConfigurationType, i=12637)
+         └─ CertificateGroups        (CertificateGroupFolderType, i=14053)
+             └─ DefaultApplicationGroup   (CertificateGroupType, i=14156)
+                 └─ TrustList        (TrustListType, i=12642)
+
+asyncua construit **déjà** les trois niveaux, avec les NodeIds d'instance
+publiés par la norme. Créer un groupe ailleurs n'ajoute aucune capacité : cela
+ajoute un nœud que la norme ne prévoit pas, en laisse un autre sans
+gestionnaire, et fait qu'un client qui parcourt le chemin normatif aboutit à un
+groupe mort renvoyant ``BadNothingToDo`` — le groupe réel, celui qu'il
+voulait lire, restant hors d'atteinte. Ce module réattache donc ses
+gestionnaires aux instances existantes au lieu d'en fabriquer.
+
+C'est la même leçon que pour l'objet ``ServerConfiguration`` lui-même : la
+première version de ce câblage en créait un second, invisible pour un test qui
+visait le NodeId, fatal pour un client qui parcourt l'espace d'adressage.
 
 Deux pièges d'asyncua 1.1.8, rencontrés et contournés ici. Tous deux sont
 silencieux : l'appel échoue sans que l'erreur ne désigne la cause.
@@ -40,11 +58,63 @@ from .trustlist import MODE_READ, CertificateGroup, TrustListError
 #: NodeIds normatifs (OPC 10000-12 §7.8.3, sous-section TrustLists §7.8.2.1).
 CERTIFICATE_GROUP_TYPE = ua.ObjectIds.CertificateGroupType          # 12555
 
-#: Base de la plage privée des instances. Les NodeIds d'instance n'ont aucune
-#: valeur normative : ils sont donc alloués loin des plages de la norme, pour
-#: ne pas risquer d'en squatter une. 3 000 000 + hash du nom.
+#: Browse names normatifs du parcours §7.8.3.3 / §7.10.4.
+GROUPS_FOLDER_NAME = "CertificateGroups"
+SERVER_CONFIGURATION_NAME = "ServerConfiguration"
+
+#: Plage privée, utilisée uniquement si un groupe doit être *créé* parce que
+#: l'instance normative est absente. Les NodeIds d'instance publiés par la
+#: norme ne sont pas squattés : les NodeIds d'un groupe ajouté par
+#: l'administrateur restent hors des plages de la norme.
 INSTANCE_BASE = 3_000_000
 INSTANCE_SPAN = 900_000
+
+#: Types de certificats admis par groupe, exigés par §7.8.3.1 : la propriété
+#: ``CertificateTypes`` est *Mandatory* et « shall specify one or more subtypes
+#: of ``ApplicationCertificateType`` » pour le groupe d'application.
+#:
+#: Les identifiants viennent du ``NodeIds.csv`` officiel de la Fondation OPC.
+#: Pour le groupe de jetons d'utilisateur, l'identifiant normatif est
+#: ``UserCertificateType`` (i=19323) : l'instantané d'asyncua est antérieur au
+#: renommage, et garde l'ancien nom ``UserCredentialCertificateType`` (i=15181)
+#: pour la même notion. C'est le numéro normatif qui est publié ici.
+CERTIFICATE_TYPES: dict[str, tuple[int, ...]] = {
+    "DefaultApplicationGroup": (
+        ua.ObjectIds.RsaMinApplicationCertificateType,      # 12559
+        ua.ObjectIds.RsaSha256ApplicationCertificateType,   # 12560
+    ),
+    "DefaultHttpsGroup": (ua.ObjectIds.HttpsCertificateType,),  # 12558
+    "DefaultUserTokenGroup": (19323,),  # UserCertificateType
+}
+
+
+async def certificate_group_folder(server):
+    """Retourne le dossier ``CertificateGroups``, en le créant s'il manque.
+
+    Le dossier est normatif : il est le ``TypeDefinition`` du conteneur qui
+    organise les groupes (§7.8.3.3). S'il est absent, le repli est de le créer
+    sous ``ServerConfiguration`` — et non sous ``Server``, qui n'est pas la
+    place prévue.
+    """
+    configuration = await _child_by_name(server.nodes.server, SERVER_CONFIGURATION_NAME)
+    if configuration is None:
+        logger.warning(
+            f"{SERVER_CONFIGURATION_NAME} absent de l'espace d'adressage : "
+            f"les groupes de certificats ne pourront pas être publiés à leur "
+            f"place normative"
+        )
+        return None
+    folder = await _child_by_name(configuration, GROUPS_FOLDER_NAME)
+    if folder is None:
+        logger.warning(
+            f"{GROUPS_FOLDER_NAME} absent de {SERVER_CONFIGURATION_NAME} : il est créé"
+        )
+        folder = await configuration.add_object(
+            ua.NodeId(ua.ObjectIds.ServerConfigurationType_CertificateGroups, 0),
+            ua.QualifiedName(GROUPS_FOLDER_NAME, 0),
+            objecttype=ua.ObjectIds.CertificateGroupFolderType,
+        )
+    return folder
 
 
 class CertificateGroupNode:
@@ -63,19 +133,82 @@ class CertificateGroupNode:
         self.node = None
         self.trust_list = None
 
-    async def build(self) -> None:
-        """Instancie ``CertificateGroupType`` et branche les gestionnaires."""
-        self.node = await self.server.nodes.server.add_object(
-            ua.NodeId(self._instance_nodeid(), 0),
-            ua.QualifiedName(self.group.name, 0),
-            objecttype=CERTIFICATE_GROUP_TYPE,
+    async def build(self, parent=None) -> None:
+        """Rattache le groupe à son instance normative et branche les méthodes.
+
+        :param parent: dossier ``CertificateGroups`` hôte. Résolu par défaut
+            depuis ``ServerConfiguration`` (§7.8.3.3) ; le repli sur le nœud
+            ``Server`` ne sert qu'à un serveur dépourvu de
+            ``ServerConfiguration``, où la norme n'offre aucune autre place.
+        """
+        if parent is None:
+            parent = await certificate_group_folder(self.server)
+        if parent is None:
+            logger.warning(
+                f"Groupe « {self.group.name} » publié sous le nœud Server : "
+                f"cette place n'est pas celle de la norme (§7.8.3.3)"
+            )
+            parent = self.server.nodes.server
+
+        self.node = await _child_by_name(parent, self.group.name)
+        if self.node is None:
+            self.node = await parent.add_object(
+                ua.NodeId(self._instance_nodeid(), 0),
+                ua.QualifiedName(self.group.name, 0),
+                objecttype=CERTIFICATE_GROUP_TYPE,
+            )
+            logger.info(
+                f"CertificateGroup « {self.group.name} » créé sous {parent.nodeid}"
+            )
+        else:
+            logger.info(
+                f"CertificateGroup « {self.group.name} » rattaché à l'instance "
+                f"normative {self.node.nodeid} sous {parent.nodeid}"
+            )
+
+        await self._declare_certificate_types()
+        await self._bind_trust_list()
+
+    async def _declare_certificate_types(self) -> None:
+        """Renseigne ``CertificateTypes``, propriété obligatoire (§7.8.3.1).
+
+        La norme dit ce que ces types signifient : « the set of permitted types
+        is specified by the ``CertificateTypes`` Property belonging to the
+        CertificateGroup » (§7.10.10). La laisser à ``None`` reviendrait à
+        interdire tout certificat — un groupe qui refuse de tout, sans le dire.
+
+        Les types déclarés sont ceux que le GDS sait réellement produire. Y
+        annoncer une courbe ECC alors que la génération de clé est limitée à
+        RSA ferait échouer ``CreateSigningRequest`` sur un type que le groupe
+        autorise : la propriété doit décrire la capacité, pas l'envie.
+        """
+        types = CERTIFICATE_TYPES.get(self.group.name)
+        if not types:
+            logger.warning(
+                f"Groupe « {self.group.name} » : aucun type de certificat "
+                f"normatif connu, la propriété CertificateTypes reste vide"
+            )
+            return
+        node = await _child_by_name(self.node, "CertificateTypes")
+        if node is None:
+            logger.warning(
+                f"Groupe « {self.group.name} » : propriété CertificateTypes "
+                f"absente de l'instance, elle n'est pas créée"
+            )
+            return
+        await node.write_value(
+            ua.Variant(
+                [ua.NodeId(identifier, 0) for identifier in types],
+                ua.VariantType.NodeId,
+            )
         )
-        logger.info(
-            f"CertificateGroup « {self.group.name} » publié sous {self.node.nodeid} "
-            f"(d'après CertificateGroupType i={ua.ObjectIds.CertificateGroupType})"
+        logger.debug(
+            f"  CertificateTypes = {', '.join('i=%d' % t for t in types)}"
         )
 
-        self.trust_list = await self._child(self.node, "TrustList")
+    async def _bind_trust_list(self) -> None:
+        """Instancie la ``TrustList`` et branche ses dix méthodes."""
+        self.trust_list = await _child_by_name(self.node, "TrustList")
         if self.trust_list is None:
             raise TrustListError(
                 "l'instance de CertificateGroupType n'expose pas d'objet TrustList"
@@ -167,13 +300,11 @@ class CertificateGroupNode:
     async def _child(self, parent, name: str):
         """Retrouve un enfant par browse name.
 
-        Les NodeIds d'instance sont alloués par asyncua, ils ne sont donc pas
-        normatifs : le browse name est le seul moyen stable de les retrouver.
+        Délégué à :func:`_child_by_name`, pour qu'un même utilitaire serve à
+        retrouver un groupe, un dossier ou une propriété.
         """
-        for node in await parent.get_children():
-            if (await node.read_browse_name()).Name == name:
-                return node
-        return None
+        return await _child_by_name(parent, name)
+
 
     async def _bind(self, parent, name: str, handler, in_args, out_args=None) -> None:
         """Recrée une méthode de l'instance avec notre gestionnaire.
@@ -264,6 +395,21 @@ class CertificateGroupNode:
 def _plain(value):
     """Retire l'éventuel ``Variant`` enveloppant une valeur d'entrée."""
     return value.Value if isinstance(value, ua.Variant) else value
+
+
+async def _child_by_name(parent, name: str):
+    """Retrouve l'enfant direct portant ce browse name, ou ``None``.
+
+    Le browse name est le seul moyen stable de retrouver un nœud ici : les
+    NodeIds d'instance sont alloués par asyncua pour tout ce que la norme ne
+    publie pas, et même normatifs ils ne sont pas garantis par la pile. Un
+    appelant qui les mémoriserait entre deux sessions verrait son pointeur
+    devenir caduc au redémarrage.
+    """
+    for node in await parent.get_children():
+        if (await node.read_browse_name()).Name == name:
+            return node
+    return None
 
 
 def _as_bytes(value) -> bytes:

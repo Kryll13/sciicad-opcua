@@ -25,10 +25,10 @@ GDS_ENDPOINT_PATH = "GlobalDiscoveryServer"
 class CertificatesConfig(BaseModel):
     """Certificats publiés et gérés par le GDS (Part 12 §7.8 et §7.10).
 
-    Le GDS est une autorité de distribution : il expose un ou plusieurs
-    groupes de certificats, chacun portant sa propre liste de confiance (§7.8).
-    Un groupe absent est un groupe vide, ce qui est conforme : un GDS qui n'a
-    encore distribué aucun certificat n'a rien à annoncer.
+    Le GDS est une autorité de distribution : il expose des groupes de
+    certificats, chacun portant sa propre liste de confiance (§7.8). Un groupe
+    sans certificat est un groupe vide, ce qui est conforme : un GDS qui n'a
+    encore distribué rien n'a rien à annoncer.
 
     Il tient en outre le rôle *CertificateManager* (§7.1) : préparer une demande
     de signature et installer le certificat signé (§7.10). Ce rôle est
@@ -36,9 +36,21 @@ class CertificatesConfig(BaseModel):
     confiance sans exposer la gestion de certificats.
     """
 
-    #: Groupes publiés au démarrage. Le premier est le groupe d'application,
-    #: celui que les serveurs OPC UA eux-mêmes utilisent.
-    groups: list[str] = Field(default_factory=lambda: ["DefaultApplicationGroup"])
+    #: Groupes rattachés au démarrage, parmi ceux que le dossier
+    #: ``CertificateGroups`` contient déjà (§7.8.3.3).
+    #:
+    #: Les trois sont repris par défaut, et c'est délibéré. Un groupe laissé
+    #: hors de cette liste reste dans l'espace d'adressage *sans*
+    #: gestionnaire : un client qui le trouve répond ``BadNothingToDo``, ce qui
+    #: est pire qu'un groupe vide mais câblé. Un groupe vide se constate et
+    #: s'explique ; un nœud muet se découvre par l'échec d'un appel.
+    groups: list[str] = Field(
+        default_factory=lambda: [
+            "DefaultApplicationGroup",
+            "DefaultHttpsGroup",
+            "DefaultUserTokenGroup",
+        ]
+    )
 
     #: Publier l'objet ``ServerConfiguration`` et ses méthodes de signature.
     manage_certificates: bool = True

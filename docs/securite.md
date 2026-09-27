@@ -95,8 +95,14 @@ signature **avant** l'appel. À défaut, tout est refusé : c'est le seul
 comportement sûr, accepter reviendrait à installer un certificat dont personne
 n'a vérifié l'origine.
 
+`GetRejectedList` ne liste pas tous les refus. §7.8.3.2 réserve cette liste aux
+certificats « that have no unsuppressed validation errors but are not trusted » :
+un certificat expiré, mal adressé ou illisible est refusé avec son code, mais
+n'y figure pas. Y verser des défauts de validation brouillerait la liste, qui
+sert à présenter des candidats à approuver, pas un journal d'erreurs.
+
 Le modèle *Pull* d'autorité de certification (§7.9, `CertificateDirectoryType`)
-n'est **pas** implémenté, et ne peut pas l'êtreconformément : ses NodeIds ne
+n'est **pas** implémenté, et ne peut pas l'être conformément : ses NodeIds ne
 sont pas publiés par la Fondation OPC. Voir
 [`serveurs.md`](serveurs.md#gdsgds_serverpy-prototype-non-expose).
 

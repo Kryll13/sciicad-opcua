@@ -80,6 +80,21 @@ async def stored_uris(db_path: str) -> list[str]:
         store.close()
 
 
+async def _by_name(parent, name: str):
+    """Enfant portant ce browse name, ou ``None``.
+
+    Les NodeIds d'instance étant alloués par la pile, le browse name est le
+    seul moyen stable de retrouver un nœud — et c'est aussi le chemin qu'un
+    client réel suivrait.
+    """
+    if parent is None:
+        return None
+    for child in await parent.get_children():
+        if (await child.read_browse_name()).Name == name:
+            return child
+    return None
+
+
 def check_scope(report: Report, gds: GlobalDiscoveryServer) -> None:
     """Vérifie qu'aucune entrée n'est jugée expirée en portée globale.
 
@@ -161,6 +176,91 @@ async def run(report: Report, gds: GlobalDiscoveryServer, db_path: str) -> None:
             len(methods) >= 9,
             f"{len(methods)} méthode(s) : {', '.join(sorted(methods))}",
         )
+
+    # -- emplacement normatif des groupes (Part 12 §7.8.3.3) ---------------
+    # Ces vérifications visent la faute que le câblage initial commettait : les
+    # groupes étaient créés sous le nœud Server, et non sous
+    # ServerConfiguration.CertificateGroups. Un test qui vise un NodeId ne voit
+    # rien ; un client qui parcourt le chemin normal, lui, aboutit au groupe
+    # d'asyncua — non câblé — et reçoit BadNothingToDo.
+    async with Client(url=url) as client:
+        server = client.nodes.server
+        configuration = await _by_name(server, "ServerConfiguration")
+        folder = await _by_name(configuration, "CertificateGroups") if configuration else None
+        report.check(
+            "le dossier CertificateGroups est sous ServerConfiguration (§7.8.3.3)",
+            folder is not None
+            and (await folder.read_type_definition()).Identifier
+            == ua.ObjectIds.CertificateGroupFolderType,
+            f"{folder.nodeid if folder else 'absent'}",
+        )
+
+        # Aucun groupe ne doit rester directement sous Server.
+        stray = [
+            child
+            for child in await server.get_children()
+            if (await child.read_node_class()) == ua.NodeClass.Object
+            and (await child.read_type_definition()).Identifier
+            == ua.ObjectIds.CertificateGroupType
+        ]
+        report.check(
+            "aucun CertificateGroupType n'est publié hors du dossier normatif",
+            not stray,
+            f"{len(stray)} groupe(s) égaré(s) : "
+            + ", ".join(str(node.nodeid) for node in stray)
+            if stray
+            else "aucun",
+        )
+
+        # Chaque groupe doit être atteint par le chemin normatif, et répondre.
+        if folder is not None:
+            reachable = {
+                (await child.read_browse_name()).Name: child
+                for child in await folder.get_children()
+            }
+            for name in expected_groups:
+                group = reachable.get(name)
+                report.check(
+                    f"le groupe « {name} » est atteignable par le chemin normatif",
+                    group is not None,
+                    f"{group.nodeid if group else 'absent du dossier'}",
+                )
+                if group is None:
+                    continue
+                trust_list = await _by_name(group, "TrustList")
+                report.check(
+                    f"le groupe « {name} » expose sa TrustList",
+                    trust_list is not None,
+                    f"{trust_list.nodeid if trust_list else 'absente'}",
+                )
+                types = await _by_name(group, "CertificateTypes")
+                value = await types.read_value() if types is not None else None
+                report.check(
+                    f"« {name} » renseigne CertificateTypes, propriété obligatoire",
+                    bool(value),
+                    ", ".join(f"i={v.Identifier}" for v in value) if value else "vide",
+                )
+                # Le test décisif : la méthode répond-elle, ou est-elle muette ?
+                if trust_list is not None:
+                    call = await _by_name(trust_list, "Open")
+                    close = await _by_name(trust_list, "Close")
+                    try:
+                        handle = await trust_list.call_method(call, ua.OpenFileMode.Read)
+                        # Une sortie unique est rendue telle quelle par
+                        # call_method, sans être emballée dans une liste.
+                        if isinstance(handle, (list, tuple)):
+                            handle = handle[0]
+                        await trust_list.call_method(close, handle)
+                        status = "Good"
+                    except Exception as exc:
+                        status = ua.StatusCode(
+                            getattr(exc, "code", ua.StatusCodes.BadInternalError)
+                        ).name
+                    report.check(
+                        f"la TrustList de « {name} » répond à Open (câblée)",
+                        status == "Good",
+                        status,
+                    )
 
     # -- FindServersOnNetwork, service que le serveur asyncua ne route pas --
     # C'est la vérification discriminante : sans le patch, la requête tombe

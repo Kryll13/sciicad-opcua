@@ -492,18 +492,31 @@ async def run(
     # NodeId forgé par un client.
 
     # -- GetRejectedList ----------------------------------------------------
+    # §7.8.3.2 : « Servers only add Certificates to this list that have no
+    # unsuppressed validation errors but are not trusted. » Seul le certificat
+    # d'une autorité non approuvée y figure donc. Un certificat expiré, mal
+    # adressé ou illisible est un défaut, pas un candidat à approuver : il est
+    # refusé avec son code, et absent de la liste.
     rejected = await client.call_array("GetRejectedList")
     report.check(
-        "GetRejectedList restitue tous les certificats refusés",
-        len(rejected) == 4,
-        f"{len(rejected)} certificat(s)",
+        "GetRejectedList ne contient que le certificat non approuvé (§7.8.3.2)",
+        {thumbprint(item) for item in rejected} == {thumbprint(forged)},
+        f"{len(rejected)} certificat(s) : "
+        + ", ".join(
+            "non approuvé" if thumbprint(item) == thumbprint(forged) else "AUTRE"
+            for item in rejected
+        ),
     )
-    report.check(
-        "les certificats refusés sont ceux soumis",
-        {thumbprint(item) for item in rejected}
-        == {thumbprint(item) for item in (expired, other, forged, b"pas-un-DER")},
-        f"{len(rejected)} empreinte(s)",
-    )
+    for label, candidate in (
+        ("expiré", expired),
+        ("mal adressé", other),
+        ("illisible", b"pas-un-DER"),
+    ):
+        report.check(
+            f"le certificat {label} est absent de la liste des rejets",
+            all(thumbprint(item) != thumbprint(candidate) for item in rejected),
+            "refusé, mais pas rejeté",
+        )
     report.check(
         "aucun certificat accepté ne figure parmi les refus",
         all(thumbprint(item) != thumbprint(signed) for item in rejected),

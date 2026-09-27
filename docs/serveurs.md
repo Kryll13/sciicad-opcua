@@ -98,11 +98,41 @@ uv run python -m gds --bind 0.0.0.0 --advertise <hôte> --database gds.db
 
 ### Groupes de certificats (Part 12 §7.8)
 
-C'est la partie qui distingue un GDS d'un LDS. Au démarrage, le GDS publie un
-`CertificateGroupType` par groupe configuré (`certificates.groups` dans
-`gds_config.yaml`, `DefaultApplicationGroup` par défaut). L'arborescence et les
-dix méthodes `TrustList` sont générées à partir de l'`ObjectType` normatif
-(i=12555) fourni par asyncua ; seule la logique est branchée.
+C'est la partie qui distingue un GDS d'un LDS. Les groupes vivent à l'endroit que
+la norme leur réserve (§7.8.3.3), sous l'objet de configuration du serveur :
+
+```
+Server
+ └─ ServerConfiguration                  i=12637  ServerConfigurationType
+     └─ CertificateGroups                i=14053  CertificateGroupFolderType
+         ├─ DefaultApplicationGroup      i=14156  CertificateGroupType
+         │   ├─ TrustList                i=12642  TrustListType
+         │   └─ CertificateTypes         i=14161
+         ├─ DefaultHttpsGroup            i=14088
+         └─ DefaultUserTokenGroup        i=14122
+```
+
+asyncua construit déjà toute cette arborescence, **avec les NodeIds d'instance
+publiés par la norme**. Le GDS s'y rattache ; il ne crée pas de groupe. La
+première version du code en créait un, directement sous le nœud `Server` : le
+groupe norms restait alors sans gestionnaire, et un client qui suivait le chemin
+normal obtenait `BadNothingToDo` — pendant que le groupe réellement servi,
+lui, était hors d'atteinte. C'est invisible pour un test qui vise un NodeId ;
+`tools/selftest_gds.py` vérifie désormais le chemin parcouru, et l'absence de
+tout groupe hors du dossier.
+
+Les trois groupes sont rattachés par défaut (`certificates.groups`), et c'est
+délibéré : un groupe laissé hors de la liste reste dans l'espace d'adressage
+sans gestionnaire. Un groupe vide mais câblé se constate et s'explique ; un nœud
+muet se découvre par l'échec d'un appel.
+
+La propriété `CertificateTypes` est **obligatoire** (§7.8.3.1) et décrit ce que
+le groupe admet : `RsaMinApplicationCertificateType` et
+`RsaSha256ApplicationCertificateType` pour le groupe d'application,
+`HttpsCertificateType` pour celui de HTTPS, `UserCertificateType` (i=19323) pour
+celui des jetons d'utilisateur. Elle ne déclare que ce que le GDS sait produire :
+annoncer une courbe ECC alors que la génération de clé est limitée à RSA
+ferait échouer `CreateSigningRequest` sur un type que le groupe autorise.
 
 La liste de confiance suit le **modèle fichier** de la norme, et non un échange
 direct de `TrustListDataType` : le client ouvre la liste, obtient un
@@ -149,20 +179,27 @@ name, dont le premier répondrait `BadNothingToDo`.
 |--------------------------------|-----------------------------------------------------------|
 | `CreateSigningRequest`         | produit une PKCS #10 DER et retient la clé privée         |
 | `UpdateCertificate`            | valide puis installe le certificat signé                   |
-| `GetRejectedList`              | restitue les certificats refusés, en DER                   |
+| `GetRejectedList`              | restitue les certificats **valides mais non approuvés**   |
 
 La validation suit le processus de la Part 4 — validité, `BasicConstraints`,
 `KeyUsage`, URI d'application dans le SAN, et surtout chaîne de signature — et
 chaque refus porte son `StatusCode` normatif :
 
-| Cas                                   | `StatusCode`              |
-|---------------------------------------|---------------------------|
-| `Nonce` de moins de 32 octets         | `BadInvalidArgument`      |
-| certificat expiré ou pas encore valide | `BadCertificateTimeInvalid` |
-| URI d'application absente du SAN       | `BadCertificateUriInvalid` |
-| autorité de signature non approuvée    | `BadCertificateUntrusted` |
-| DER illisible, clé privée incohérente | `BadCertificateInvalid`   |
-| `CertificateGroupId` inconnu          | `BadNodeIdUnknown`        |
+| Cas                                   | `StatusCode`              | Versé à `GetRejectedList` |
+|---------------------------------------|---------------------------|---------------------------|
+| `Nonce` de moins de 32 octets         | `BadInvalidArgument`      | non                       |
+| certificat expiré ou pas encore valide | `BadCertificateTimeInvalid` | non                    |
+| URI d'application absente du SAN       | `BadCertificateUriInvalid` | non                       |
+| autorité de signature non approuvée    | `BadCertificateUntrusted` | **oui**                   |
+| DER illisible, clé privée incohérente | `BadCertificateInvalid`   | non                       |
+| `CertificateGroupId` inconnu          | `BadNodeIdUnknown`        | non                       |
+
+La dernière colonne est la sémantique de §7.8.3.2 : *« Servers only add
+Certificates to this list that have no unsuppressed validation errors but are
+not trusted. »* Seul un certificat **valide mais non approuvé** y figure. Un
+certificat expiré ou mal adressé est un défaut, pas un candidat à approuver : le
+client a mieux à faire que de le retrouver dans une liste à approuver. Il est
+donc refusé, avec son code, sans être enregistré.
 
 La chaîne d'émetteurs fournie avec `UpdateCertificate` est versée dans la liste
 `issuer_certificates` du groupe, comme l'exige §7.10.5 : la validation suppose que
@@ -183,8 +220,8 @@ restent des méthodes générées **sans gestionnaire**, et répondent donc
 ce GDS applique ses changements immédiatement. Les câbler à vide donnerait un
 `Good` trompeur — pire que le refus.
 
-Vérifié par `tools/selftest_certmanager.py` (32 vérifications, dont 5 sur la
-validation et le refus).
+Vérifié par `tools/selftest_certmanager.py` (34 vérifications) et, pour
+l'emplacement des groupes, par `tools/selftest_gds.py` (35 vérifications).
 
 ### `gds/gds_server.py` — prototype non exposé
 

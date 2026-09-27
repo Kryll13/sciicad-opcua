@@ -41,15 +41,21 @@ database:
   event_log: true
 
 certificates:
-  # Groupes de certificats publies au demarrage (Part 12 §7.8). Chaque groupe
-  # est un CertificateGroupType, avec sa propre liste de confiance.
+  # Groupes de certificats rattaches au demarrage (Part 12 §7.8.3.3). Ils sont
+  # publies sous ServerConfiguration.CertificateGroups, a l'endroit que la norme
+  # leur reserve, et reutilisent les instances que le serveur a deja creees.
   #
-  # DefaultApplicationGroup est celui qu'utilisent les serveurs OPC UA eux-memes
-  # pour faire confiance a une autorite de certification. Un groupe absent est
-  # un groupe vide : c'est conforme, un GDS qui n'a encore distribue aucun
-  # certificat n'a rien a annoncer.
+  # Les trois sont repris par defaut, et c'est delibere : un groupe laisse
+  # hors de cette liste reste dans l'espace d'adressage SANS gestionnaire, et
+  # repondrait BadNothingToDo. Un groupe vide mais cable se constate et
+  # s'explique ; un noeud muet se decouvre par l'echec d'un appel.
+  #
+  # Un groupe sans certificat est un groupe vide : c'est conforme, un GDS qui
+  # n'a encore distribue rien n'a rien a annoncer.
   groups:
     - DefaultApplicationGroup
+    - DefaultHttpsGroup
+    - DefaultUserTokenGroup
 
   # Publier l'objet ServerConfiguration et ses methodes de signature
   # (Part 12 §7.10), qui font du GDS un CertificateManager : il prepare une

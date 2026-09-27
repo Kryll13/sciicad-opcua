@@ -24,7 +24,10 @@ from loguru import logger
 
 from lds.server import DiscoveryServer
 
-from .certificategroup import CertificateGroupNode
+from .certificategroup import (
+    CertificateGroupNode,
+    certificate_group_folder,
+)
 from .certstore import CertificateStore
 from .config import GDSConfig
 from .serverconfiguration import ServerConfigurationNode
@@ -57,23 +60,45 @@ class GlobalDiscoveryServer(DiscoveryServer):
         await self._build_certificate_manager()
 
     async def _build_certificate_groups(self) -> None:
-        """Publie les ``CertificateGroupType`` configurés.
+        """Rattache les ``CertificateGroupType`` configurés à leur dossier.
+
+        Les groupes sont publiés sous ``ServerConfiguration.CertificateGroups``,
+        à l'endroit que la norme leur réserve (§7.8.3.3) : le GDS réattache ses
+        gestionnaires aux instances qu'asyncua a déjà créées, il n'en fabrique
+        pas de nouvelles. Un groupe créé ailleurs laisserait l'instance
+        normative sans gestionnaire — donc ``BadNothingToDo`` pour le client qui
+        suit le chemin normal — tout en ajoutant un nœud imprévu.
 
         La construction a lieu après ``setup()`` mais avant ``start()`` : un
         groupe doit exister dans l'espace d'adressage avant que le serveur
         n'accepte une connexion, sinon un client qui découvre le GDS pourrait
         parcourir l'arborescence et trouver le dossier incomplet.
+
+        Le dossier hôte est disponible dès ``Server.init()``, qui construit déjà
+        ``ServerConfiguration`` et son ``CertificateGroups``. L'ordre des deux
+        méthodes ci-dessous tient donc à une autre raison : le magasin de
+        certificats valide les entrées à partir des listes de confiance des
+        groupes, et le construit après.
         """
         if self.server is None:
+            return
+        folder = await certificate_group_folder(self.server)
+        if folder is None:
+            logger.error(
+                "Dossier CertificateGroups introuvable : aucun groupe de "
+                "certificats n'est publié"
+            )
             return
         for name in self.config.certificates.groups:
             group = CertificateGroup(name=name)
             node = CertificateGroupNode(self.server, group)
-            await node.build()
+            await node.build(parent=folder)
             self.certificate_groups[name] = node
         if self.certificate_groups:
             logger.info(
-                f"Groupes de certificats publiés : {', '.join(self.certificate_groups)}"
+                f"Groupes de certificats publiés sous {folder.nodeid} "
+                f"(CertificateGroupFolderType i={ua.ObjectIds.CertificateGroupFolderType})"
+                f" : {', '.join(self.certificate_groups)}"
             )
 
     def certificate_group(self, name: str) -> Optional[CertificateGroup]:

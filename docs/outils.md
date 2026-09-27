@@ -200,6 +200,16 @@ avec un `RecordId` croissant, le retrait par `IsOnline = False` évacue l'entré
 de la mémoire *et* de la base, et le registre restauré au démarrage fait foi
 sans renouvellement.
 
+L'emplacement des groupes de certificats y est vérifié **par le chemin
+parcouru**, et non par NodeId : dossier `CertificateGroups` sous
+`ServerConfiguration` (§7.8.3.3), aucun `CertificateGroupType` égaré sous
+`Server`, propriété `CertificateTypes` renseignée, et `Open` réellement
+appelé sur la `TrustList` de chaque groupe. Le dernier point est le
+discriminant — un groupe présent mais non câblé répond `BadNothingToDo`, ce que
+seul un appel révèle. Ces vérifications ont été ajoutées après coup, en
+vérifiant qu'un retour délibéré à la publication sous `Server` les faisait
+échouer.
+
 ### `selftest_trustlist.py` — liste de confiance du GDS (Part 12 §7.8)
 
 Interroge un `CertificateGroupType` **par le réseau**, avec un client qui
@@ -231,10 +241,16 @@ Vérifié notamment : l'objet est bien l'instance normative i=12637 et il n'en
 existe qu'une seule ; les trois méthodes ont la signature normative, entrées et
 sorties ; la PKCS #10 produite est réellement exploitable et porte l'URI
 d'application ; un certificat d'une autorité de confiance est accepté ; un
-`Nonce` trop court, un certificat expiré, un certificat portant une autre URI, un
-certificat d'une autorité non approuvée et un DER illisible sont chacun refusés
-avec leur `StatusCode` normatif ; `GetRejectedList` restitue exactement les
-quatre refus.
+`Nonce` trop court, un certificat expiré, un certificat portant une autre URI,
+un certificat d'une autorité non approuvée et un DER illisible sont chacun refusés
+avec leur `StatusCode` normatif.
+
+`GetRejectedList` est vérifié dans les deux sens : elle contient le certificat
+**valide mais non approuvé**, et ne contient ni le certificat expiré, ni celui
+portant une autre URI, ni le DER illisible. §7.8.3.2 réserve cette liste aux
+certificats « that have no unsuppressed validation errors but are not trusted » —
+un test qui ne vérifierait que sa présence passerait avec n'importe quelle
+sur-population.
 
 > Une vérification vaut mieux qu'un test : le nombre d'objets
 > `ServerConfiguration` est vérifié explicitement, parce que le câblage initial

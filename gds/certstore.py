@@ -85,9 +85,20 @@ class CertificateError(ua.UaError):
     reçoit le bon code.
     """
 
-    def __init__(self, message: str, status: int = ua.StatusCodes.BadInvalidArgument) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int = ua.StatusCodes.BadInvalidArgument,
+        untrusted: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        #: Vrai si le refus tient à la seule absence de confiance, et non à une
+        #: erreur de validation. §7.8.3.2 réserve la liste des rejets aux
+        #: certificats « that have no unsuppressed validation errors but are
+        #: not trusted » : un certificat expiré, mal adressé ou illisible est
+        #: refusé, mais n'a rien à faire sur cette liste.
+        self.untrusted = untrusted
 
 
 def _invalid(message: str) -> CertificateError:
@@ -96,6 +107,13 @@ def _invalid(message: str) -> CertificateError:
 
 def _bad_certificate(message: str) -> CertificateError:
     return CertificateError(message, ua.StatusCodes.BadCertificateInvalid)
+
+
+def _untrusted(message: str) -> CertificateError:
+    """Refus faute de confiance : le seul cas qui appartienne à la liste."""
+    return CertificateError(
+        message, ua.StatusCodes.BadCertificateUntrusted, untrusted=True
+    )
 
 
 def parse_subject(subject: str) -> x509.Name:
@@ -327,7 +345,13 @@ class CertificateStore:
             return found
 
     def rejected(self) -> list[bytes]:
-        """Certificats refusés à la validation, du plus ancien au plus récent."""
+        """Certificats *valides mais non approuvés*, du plus ancien au récent.
+
+        C'est le contenu que ``GetRejectedList`` restitue (§7.8.3.2). La liste
+        est sans limite de taille ni de durée, comme la norme le permet : un
+        serveur peut en supprimer des entrées si le message ne tient pas dans
+        la taille maximale, mais rien ici n'impose de le faire.
+        """
         with self._lock:
             return list(self._rejected)
 
@@ -338,7 +362,12 @@ class CertificateStore:
             return count
 
     def _reject(self, der: bytes, reason: str) -> None:
-        logger.warning(f"Certificat refusé : {reason}")
+        """Verse un certificat dans la liste des rejets, sans doublon.
+
+        Appelé uniquement pour un refus tenant à la confiance : c'est
+        l'appelant, qui connaît la nature du refus, qui décide.
+        """
+        logger.warning(f"Certificat non approuvé : {reason}")
         with self._lock:
             if der and all(previous != der for previous in self._rejected):
                 self._rejected.append(der)
@@ -429,7 +458,13 @@ class CertificateStore:
         La validation suit le processus de la Part 4 : période de validité,
         contraintes de base, usage de la clé, présence de l'URI d'application,
         et surtout la signature, qui doit remonter à un certificat de confiance
-        du groupe. Un certificat refusé est conservé pour ``GetRejectedList``.
+        du groupe.
+
+        Seul un certificat *valide mais non approuvé* est versé à la liste des
+        rejets (§7.8.3.2). Un certificat expiré ou mal adressé est une erreur de
+        validation, pas un rejet d'approbation : le client a mieux à faire que
+        de le retrouver dans une liste de candidats à approuver. Il est donc
+        refusé, avec son code, sans être enregistré.
         """
         if not certificate:
             raise _invalid("certificat vide")
@@ -437,13 +472,13 @@ class CertificateStore:
         try:
             parsed = x509.load_der_x509_certificate(certificate)
         except Exception as exc:
-            self._reject(certificate, f"DER illisible : {exc}")
             raise _bad_certificate(f"certificat DER illisible : {exc}") from exc
 
         try:
             self._validate(parsed, group)
         except CertificateError as exc:
-            self._reject(certificate, str(exc))
+            if exc.untrusted:
+                self._reject(certificate, str(exc))
             raise
 
         key = self._install_key(group, type_id, private_key_format, private_key)
@@ -455,9 +490,6 @@ class CertificateStore:
                 "CreateSigningRequest ou fournie avec le certificat"
             )
         if _public_key_of(key) != _public_key_of(parsed.public_key()):
-            self._reject(
-                certificate, "la clé privée ne correspond pas à la clé publique"
-            )
             raise _bad_certificate(
                 "la clé privée fournie ne correspond pas à la clé publique du "
                 "certificat"
@@ -473,7 +505,7 @@ class CertificateStore:
 
         # La norme est explicite : la validation suppose que les certificats
         # d'émetteur figurent déjà dans la liste de confiance du groupe. Les
-        #CHAÎnes fournies sont donc conservées, ce qui rend la confiance
+        # chaînes fournies sont donc conservées, ce qui rend la confiance
         # reproductible pour les stations qui viendront lire la liste.
         chain = self.groups.get(group)
         for issuer in issuer_certificates:
@@ -557,11 +589,10 @@ class CertificateStore:
             )
 
         if not self._chains_to_trusted_issuer(certificate, group):
-            raise CertificateError(
+            raise _untrusted(
                 f"la signature ne remonte à aucun certificat de confiance du "
                 f"groupe {group!r} (ni comme certificats de confiance, ni comme "
-                f"émetteurs)",
-                ua.StatusCodes.BadCertificateUntrusted,
+                f"émetteurs)"
             )
 
     def _has_application_uri(self, certificate: x509.Certificate) -> bool:
