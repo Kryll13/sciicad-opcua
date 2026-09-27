@@ -200,6 +200,22 @@ avec un `RecordId` croissant, le retrait par `IsOnline = False` évacue l'entré
 de la mémoire *et* de la base, et le registre restauré au démarrage fait foi
 sans renouvellement.
 
+### `selftest_trustlist.py` — liste de confiance du GDS (Part 12 §7.8)
+
+Interroge un `CertificateGroupType` **par le réseau**, avec un client qui
+parcourt l'espace d'adressage comme le ferait un vrai consommateur. Une méthode
+annoncée mais non câblée échoue donc ici.
+
+```bash
+uv run tools/selftest_trustlist.py
+```
+
+Vérifié notamment : les dix méthodes `TrustList` répondent, `AddCertificate` est
+idempotent, la lecture par blocs donne le même contenu que la lecture en un
+bloc, un `Open` en lecture seule refuse `Write` avec `BadNotWritable`,
+`OpenWithMasks` ne livre que les listes demandées, et un `FileHandle` inconnu
+donne `BadInvalidArgument`.
+
 ### `selftest_thermo_lifecycle.py` — cycle de vie réel (SIGTERM)
 
 Lance un PLC dans un vrai sous-processus face à un LDS, puis envoie `SIGTERM`

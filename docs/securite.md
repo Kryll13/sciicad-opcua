@@ -64,14 +64,22 @@ groupes de confiance, audit, et gestion des rôles en base
 (`authenticated_user`, `security_admin`, `configure_admin`, `discovery_admin`,
 `certificate_authority_admin`).
 
-**Ces fonctions ne sont pas atteignables en l'état.** Les services sont
-déclarés comme nœuds `Method` à NodeIds non normatifs, avec des entrées et
-sorties en `String` : aucun client OPC UA normatif ne les appelle. Ce n'est pas
-une réserve de forme, c'est un fait mesuré — un client standard interrogeant ce
-serveur n'atteint aucun de ces gestionnaires.
+**L'émission de certificats n'est pas encore atteignable.** Les services de
+`gds_server.py` sont déclarés comme nœuds `Method` à NodeIds non normatifs, avec
+des entrées et sorties en `String` : aucun client OPC UA normatif ne les appelle.
+Ce n'est pas une réserve de forme, c'est un fait mesuré — un client standard
+interrogeant ce serveur n'atteint aucun de ces gestionnaires.
 
-Le fichier reste dans le dépôt parce que la couche est cohérente et constitue
-la base de ce travail. Son exposition normative est la prochaine étape.
+**En revanche, la gestion des listes de confiance est exposée conformément.**
+Elle suit le modèle fichier de la Part 12 §7.8.2, sous les NodeIds normatifs du
+`CertificateGroupType` (i=12555 et suivants) : voir
+[`serveurs.md`](serveurs.md#groupes-de-certificats-part-12-78). Un GDS publie
+donc déjà ses groupes de certificats, et un client peut lire et modifier leurs
+listes de confiance par `Open`/`Read`/`Write`/`AddCertificate`.
+
+Ce qui reste à faire : l'autorité de certification elle-même — émettre des
+certificats signés, approuver les demandes, distribuer les CRL. Le code de
+`gds_server.py` en est la base, mais son exposition reste à refaire.
 
 Configuration prévue (`gds/gds_config.yaml` du prototype) :
 

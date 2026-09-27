@@ -39,3 +39,15 @@ database:
   enabled: true
   path: gds.db
   event_log: true
+
+certificates:
+  # Groupes de certificats publies au demarrage (Part 12 §7.8). Chaque groupe
+  # est un CertificateGroupType, avec sa propre liste de confiance.
+  #
+  # DefaultApplicationGroup est celui qu'utilisent les serveurs OPC UA eux-memes
+  # pour faire confiance a une autorite de certification. Un groupe absent est
+  # un groupe vide : c'est conforme, un GDS qui n'a encore distribue aucun
+  # certificat n'a rien a annoncer.
+  groups:
+    - DefaultApplicationGroup
+

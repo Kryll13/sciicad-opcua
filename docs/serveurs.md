@@ -66,12 +66,14 @@ Paquet Python (`uv run python -m gds`), application `urn:SCIICAD:gds`. Le GDS
 réutilise l'assemblage du LDS : mêmes services de la Part 4, même persistance,
 aucune duplication.
 
-| Fichier          | Rôle                                                    |
-|------------------|---------------------------------------------------------|
-| `__main__.py`    | point d'entrée en ligne de commande                     |
-| `config.py`      | configuration YAML, valeurs par défaut du rôle GDS     |
-| `server.py`      | `GlobalDiscoveryServer`, spécialisation de `DiscoveryServer` |
-| `gds_config.yaml`| configuration                                          |
+| Fichier              | Rôle                                                          |
+|----------------------|---------------------------------------------------------------|
+| `__main__.py`        | point d'entrée en ligne de commande                           |
+| `config.py`          | configuration YAML, valeurs par défaut du rôle GDS           |
+| `server.py`          | `GlobalDiscoveryServer`, spécialisation de `DiscoveryServer`   |
+| `trustlist.py`       | liste de confiance : 4 listes, modèle fichier, empreintes      |
+| `certificategroup.py`| publication du `CertificateGroupType` et câblage des méthodes   |
+| `gds_config.yaml`    | configuration                                                |
 
 ### Ce qui distingue le GDS du LDS
 
@@ -94,7 +96,43 @@ uv run python -m gds --bind 0.0.0.0 --advertise <hôte> --database gds.db
 
 `--ttl` n'est pas proposé : en portée globale il n'aurait aucun effet.
 
-### `gds/gds_server.py` — prototype de la couche certificats
+### Groupes de certificats (Part 12 §7.8)
+
+C'est la partie qui distingue un GDS d'un LDS. Au démarrage, le GDS publie un
+`CertificateGroupType` par groupe configuré (`certificates.groups` dans
+`gds_config.yaml`, `DefaultApplicationGroup` par défaut). L'arborescence et les
+dix méthodes `TrustList` sont générées à partir de l'`ObjectType` normatif
+(i=12555) fourni par asyncua ; seule la logique est branchée.
+
+La liste de confiance suit le **modèle fichier** de la norme, et non un échange
+direct de `TrustListDataType` : le client ouvre la liste, obtient un
+`FileHandle`, puis lit ou écrit par morceaux à une position courante. Le contenu
+transité est un `TrustListDataType` binaire, dont la structure est normativisée
+par la pile.
+
+| Méthode                  | Effet                                                    |
+|--------------------------|----------------------------------------------------------|
+| `Open`                   | ouvre et retourne un `FileHandle` ; incrémente `OpenCount` |
+| `Read` / `Write`         | lecture / écriture à la position courante                |
+| `GetPosition` / `SetPosition` | déplacement dans le fichier                        |
+| `OpenWithMasks`          | ouvre en ne chargeant que les listes demandées           |
+| `CloseAndUpdate`         | publie le contenu si l'ouverture a été modifiée         |
+| `AddCertificate`         | ajoute un certificat DER, par empreinte                 |
+| `RemoveCertificate`      | retire par empreinte SHA-1                               |
+
+Deux règles de sûreté, vérifiées par `tools/selftest_trustlist.py` :
+
+- `Open` en lecture seule refuse `Write` avec `BadNotWritable`, et
+  `OpenWithMasks` n'ouvre jamais en écriture. Un client qui veut lire ne peut
+  donc pas réécrire la liste de confiance.
+- `OpenCount` retombe à zéro après `Close`. La norme expose ce compteur pour
+  qu'une ouverture abandonnée — un client qui disparaît sans fermer — soit
+  visible de l'administrateur.
+
+`AddCertificate` est idempotent : l'appartenance est déduite de l'empreinte du
+certificat, pas d'une table d'index, donc ré-ajouter ne crée pas de doublon.
+
+### `gds/gds_server.py` — prototype non exposé
 
 Ce fichier (2126 lignes) reste dans le dépôt mais **n'est plus le point
 d'entrée**, et ses services ne sont pas exploitables tels quels. Il exposait
@@ -105,8 +143,11 @@ appelle, un `FindServers` standard ne renvoyait que le GDS lui-même, et un
 `FindServersOnNetwork` se faisait refuser par `BadUserAccessDenied`.
 
 Sa couche certificats (registre SQLAlchemy, CA, groupes de confiance, audit)
-n'a jamais été atteignable non plus. Elle reste la base de la Part 11/12, mais
-son exposition normative reste à faire.
+n'a jamais été atteignable non plus. Elle reste la base de la Part 11/12 : en
+revanche, la gestion des listes de confiance est désormais exposée
+conformément, via `gds/trustlist.py` et `gds/certificategroup.py`. Ce qui reste
+à faire concerns l'**autorité de certification** elle-même : émettre des
+certificats signés, approuver les demandes, distribuer les CRL.
 
 ## thermo-plc — PLC Thermostat (`thermo-plc/`)
 

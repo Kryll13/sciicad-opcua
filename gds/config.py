@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from lds.config import DatabaseConfig, DiscoveryConfig, LDSConfig, ServerConfig
 
@@ -22,6 +22,20 @@ DEFAULT_CONFIG_FILENAME = "gds_config.yaml"
 GDS_ENDPOINT_PATH = "GlobalDiscoveryServer"
 
 
+class CertificatesConfig(BaseModel):
+    """Certificats publiés par le GDS (Part 12 §7.8).
+
+    Le GDS est une autorité de distribution : il expose un ou plusieurs
+    groupes de certificats, chacun portant sa propre liste de confiance. Un
+    groupe absent est un groupe vide, ce qui est conforme : un GDS qui n'a
+    encore distribué aucun certificat n'a rien à annoncer.
+    """
+
+    #: Groupes publiés au démarrage. Le premier est le groupe d'application,
+    #: celui que les serveurs OPC UA eux-mêmes utilisent.
+    groups: list[str] = Field(default_factory=lambda: ["DefaultApplicationGroup"])
+
+
 class GDSConfig(LDSConfig):
     """Configuration d'un GDS : portée globale, endpoint dédié.
 
@@ -31,6 +45,8 @@ class GDSConfig(LDSConfig):
     """
 
     config_filename: ClassVar[str] = DEFAULT_CONFIG_FILENAME
+
+    certificates: CertificatesConfig = Field(default_factory=CertificatesConfig)
 
     server: ServerConfig = Field(
         default_factory=lambda: ServerConfig(

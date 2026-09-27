@@ -316,6 +316,7 @@ Vérifications disponibles, sans toucher au LDS de production :
 ```bash
 uv run tools/selftest_lds.py               # LDS : registre, TTL, pagination
 uv run tools/selftest_gds.py               # GDS : services Part 4, portée globale
+uv run tools/selftest_trustlist.py         # liste de confiance GDS (Part 12 §7.8)
 uv run tools/selftest_thermo_lds.py        # sciicad.discovery : enregistrement/retrait
 uv run tools/selftest_thermo_lifecycle.py  # cycle réel des deux PLC, avec SIGTERM
 uv run tools/selftest_thermo_lifecycle.py protect-plc   # un seul simulateur
@@ -329,6 +330,9 @@ temporaire.
 vérification qui distingue un vrai serveur de découverte d'une façade : si
 `FindServersOnNetwork` renvoie `BadUserAccessDenied`, le service n'est pas
 routé, quelle que soit la qualité du journal de démarrage.
+
+`selftest_trustlist.py` parcourt l'espace d'adressage comme un client ordinaire
+et appelle chaque méthode de la liste de confiance par le réseau.
 
 ## Dépannage
 

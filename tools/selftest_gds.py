@@ -24,7 +24,7 @@ import sys
 import tempfile
 from typing import Any, Optional
 
-from asyncua import Client, Server
+from asyncua import Client, Server, ua
 from loguru import logger
 
 from gds.config import GDSConfig
@@ -128,6 +128,39 @@ async def run(report: Report, gds: GlobalDiscoveryServer, db_path: str) -> None:
         gds.role == "GDS" and gds.scope == "global",
         f"{gds.role} / {gds.scope}",
     )
+
+    # -- groupes de certificats (Part 12 §7.8) ------------------------------
+    # Le GDS publie un CertificateGroupType par groupe configuré. Sans lui, le
+    # GDS n'est qu'un LDS : c'est la partie qui le distingue.
+    expected_groups = gds.config.certificates.groups
+    report.check(
+        "les groupes de certificats configurés sont publiés",
+        set(gds.certificate_groups) == set(expected_groups),
+        f"{sorted(gds.certificate_groups)} (attendu {sorted(expected_groups)})",
+    )
+    for name in expected_groups:
+        group = gds.certificate_group(name)
+        report.check(
+            f"le groupe « {name} » est joignable par le registre",
+            group is not None,
+            f"{group.describe() if group else 'absent'}",
+        )
+    if gds.certificate_groups:
+        # L'espace d'adressage doit exposer la TrustList, sinon un client
+        # découvre un dossier vide.
+        node = next(iter(gds.certificate_groups.values()))
+        async with Client(url=url) as client:
+            children = await client.get_node(node.trust_list.nodeid).get_children()
+            methods = {
+                (await child.read_browse_name()).Name
+                for child in children
+                if (await child.read_node_class()) == ua.NodeClass.Method
+            }
+        report.check(
+            "l'objet TrustList est publié avec ses méthodes",
+            len(methods) >= 9,
+            f"{len(methods)} méthode(s) : {', '.join(sorted(methods))}",
+        )
 
     # -- FindServersOnNetwork, service que le serveur asyncua ne route pas --
     # C'est la vérification discriminante : sans le patch, la requête tombe
