@@ -74,3 +74,14 @@ certificates:
   # identite le GDS doit annoncer.
   hostnames: []
 
+audit:
+  # Evenements d'audit OPC UA (Part 12 7.8.2.13 et 7.10.27). Un client abonne
+  # recoit TrustListUpdatedAuditEventType quand la liste de confiance change, et
+  # CertificateUpdatedAuditEventType quand un certificat est installe.
+  #
+  # A NE PAS confondre avec database.event_log, qui ecrit des lignes dans une
+  # table SQLite : l'evenement d'audit est une notification OPC UA, il n'atteint
+  # que les clients abonnes. Desactiver ici laisse les modifications de
+  # certificats silencieuses pour tout client OPC UA.
+  enabled: true
+

@@ -242,6 +242,31 @@ rien de faux.
 > vérifiait l'objet, pas le chemin d'accès. Validé en désactivant la
 > republication : quatre contrôles échouent, dont `nœud=0, modèle=1`.
 
+### `selftest_audit.py` — événements d'audit du GDS (Part 12 §7.8.2.13, §7.10.27)
+
+Souscrit **réellement** aux deux `ObjectType` d'audit et compte ce qui arrive.
+Un événement d'audit n'est pas une ligne de journal : il ne parvient qu'aux
+clients abonnés, donc un test qui ne s'abonne pas ne prouve rien.
+
+```bash
+uv run tools/selftest_audit.py
+```
+
+Vérifié notamment : un `AddCertificate` qui modifie la liste émet **un**
+`TrustListUpdatedAuditEventType`, portant le `TrustListId` de l'objet et le
+`MethodId` de la méthode appelée ; un `AddCertificate` **idempotent** n'émet
+rien, alors que la méthode a réussi ; `Open`, `Read` et `Close` n'émettent rien ;
+un `UpdateCertificate` **refusé** n'émet rien et un **accepté** en émet un ; les
+données volumineuses sont résumées par leur empreinte dans `InputArguments`
+plutôt que recopiées ; la sévérité est bien 300, celle d'un audit.
+
+> Deux pièges d'asyncua 1.1.8, tous deux silencieux. Le gestionnaire reçoit **un**
+> `Event` par notification, déballe côté client : chercher une liste
+> `Events` ne trouve rien et le test compte zéro événement sans jamais échouer
+> sur une erreur. Et le `NodeId` d'un nœud **serveur** est un `NumericNodeId`,
+> absent de la table des ExtensionObject : le passer en argument casse la
+> sérialisation sur `KeyError`. Un client normatif n'a jamais ce second cas.
+
 ### `selftest_certmanager.py` — rôle CertificateManager du GDS (Part 12 §7.10)
 
 Interroge l'objet `ServerConfiguration` **par le réseau**. Le test fabrique sa

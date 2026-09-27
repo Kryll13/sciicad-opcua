@@ -61,10 +61,16 @@ class ServerConfigurationNode:
         server,
         store: CertificateStore,
         group_name: Optional[Callable[[ua.NodeId], Optional[str]]] = None,
+        group_nodeids: Optional[dict] = None,
+        audit=None,
     ) -> None:
         self.server = server
         self.store = store
         self._group_name = group_name
+        #: Nom de groupe -> NodeId publié, pour l'événement d'audit.
+        self._group_nodeids = group_nodeids if group_nodeids is not None else {}
+        #: Émetteur d'audit, ou ``None``.
+        self.audit = audit
         self.node = None
 
     async def build(self) -> None:
@@ -172,8 +178,9 @@ class ServerConfigurationNode:
         await node.delete()
 
         async def call(_parent, *inputs):
+            plain = tuple(_plain(value) for value in inputs)
             try:
-                return await handler(*(_plain(value) for value in inputs))
+                result = await handler(*plain)
             except CertificateError as exc:
                 # Le statut porté par l'exception est *retourné* : une exception
                 # levée serait réencapsulée en BadUnexpectedError, et le client
@@ -184,11 +191,52 @@ class ServerConfigurationNode:
             except Exception:  # pragma: no cover - garde-fou
                 logger.exception(f"{name} : erreur inattendue")
                 return ua.StatusCode(ua.StatusCodes.BadInternalError)
+            if name == "UpdateCertificate" and self.audit is not None:
+                await self._audit_certificate(nodeid, plain, result)
+            return result
 
         await self.node.add_method(
             nodeid, ua.QualifiedName(name, 0), call, list(in_args), list(out_args or []), None
         )
         logger.debug(f"  {name} (i={nodeid.Identifier}) branché sur {BROWSE_NAME}")
+
+    async def _audit_certificate(self, method: ua.NodeId, inputs, result) -> None:
+        """Émet ``CertificateUpdatedAuditEventType`` après une installation.
+
+        §7.10.27 : « raised when a Certificate is actually changed as a result
+        of a Method call », donc ici un ``UpdateCertificate`` réussi. « No Event
+        is raised if the Method call fails. » — d'où le point d'appel, dans le
+        wrapper, après le traitement du refus.
+
+        La propriété ``CertificateGroup`` désigne l'objet groupe, pas un nom :
+        le destinataire de l'événement doit pouvoir le retrouver sans
+        connaître l'implémentation du GDS.
+        """
+        if isinstance(result, ua.StatusCode):
+            return
+        group_nodeid, type_nodeid = inputs[0], inputs[1]
+        if group_nodeid is None or (isinstance(group_nodeid, ua.NodeId) and group_nodeid.is_null()):
+            group_nodeid = self._default_group_nodeid()
+        if group_nodeid is None:
+            return
+        await self.audit.certificate_updated(
+            certificate_group=group_nodeid,
+            certificate_type=_type_nodeid(type_nodeid),
+            method=method,
+            arguments=f"UpdateCertificate({_describe_certificate_inputs(inputs)})",
+        )
+
+    def _default_group_nodeid(self) -> Optional[ua.NodeId]:
+        """NodeId du groupe visé quand le client a passé un NodeId nul.
+
+        §7.10.5 fait du NodeId nul une demande portant sur le
+        ``DefaultApplicationGroup``. Sans groupe publié, l'événement est
+        abandonné : mieux vaut une trace absente qu'une trace qui désigne le
+        mauvais groupe.
+        """
+        for name in (self._group_nodeids or {}):
+            return self._group_nodeids[name]
+        return None
 
     def _group_of(self, nodeid) -> str:
         """Résout un ``CertificateGroupId`` en nom de groupe.
@@ -243,6 +291,32 @@ class ServerConfigurationNode:
 
     async def _get_rejected_list(self):
         return [ua.Variant(self.store.rejected(), ua.VariantType.ByteString)]
+
+
+def _describe_certificate_inputs(inputs) -> str:
+    """Rendu lisible des arguments de ``UpdateCertificate`` pour l'audit.
+
+    Les données volumineuses sont résumées par leur empreinte : la propriété
+    ``InputArguments`` d'un événement d'audit doit permettre de rejouer l'appel,
+    pas de recopier le certificat entier dans la base du client.
+    """
+    from .trustlist import thumbprint
+
+    parts = []
+    for value in inputs:
+        if isinstance(value, (bytes, bytearray)) and len(value) > 64:
+            parts.append(f"<{len(value)} octets, empreinte {thumbprint(bytes(value))[:12]}…>")
+        elif isinstance(value, (list, tuple)):
+            parts.append(
+                "[" + ", ".join(
+                    f"<{len(item)} octets>" if isinstance(item, (bytes, bytearray)) and len(item) > 64
+                    else repr(item)
+                    for item in value
+                ) + "]"
+            )
+        else:
+            parts.append(repr(value))
+    return ", ".join(parts)
 
 
 def _plain(value):

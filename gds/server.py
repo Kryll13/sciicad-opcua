@@ -24,6 +24,7 @@ from loguru import logger
 
 from lds.server import DiscoveryServer
 
+from .audit import AuditEmitter, build_for
 from .certificategroup import (
     CertificateGroupNode,
     certificate_group_folder,
@@ -52,10 +53,14 @@ class GlobalDiscoveryServer(DiscoveryServer):
         self.certificate_store: Optional[CertificateStore] = None
         #: Objet ``ServerConfiguration`` publié, ou ``None``.
         self.server_configuration: Optional[ServerConfigurationNode] = None
+        #: Émetteur d'audit OPC UA, ou ``None`` si désactivé ou indisponible.
+        self.audit: Optional[AuditEmitter] = None
 
     async def setup(self) -> None:
         """Assemble le serveur, puis publie les objets de certificats."""
         await super().setup()
+        if self.config.audit.enabled:
+            self.audit = await build_for(self.server)
         await self._build_certificate_groups()
         await self._build_certificate_manager()
 
@@ -91,7 +96,7 @@ class GlobalDiscoveryServer(DiscoveryServer):
             return
         for name in self.config.certificates.groups:
             group = CertificateGroup(name=name)
-            node = CertificateGroupNode(self.server, group)
+            node = CertificateGroupNode(self.server, group, audit=self.audit)
             await node.build(parent=folder)
             self.certificate_groups[name] = node
         if self.certificate_groups:
@@ -125,7 +130,15 @@ class GlobalDiscoveryServer(DiscoveryServer):
             key_size=self.config.certificates.key_size,
         )
         self.server_configuration = ServerConfigurationNode(
-            self.server, self.certificate_store, group_name=self._group_name
+            self.server,
+            self.certificate_store,
+            group_name=self._group_name,
+            group_nodeids={
+                name: node.node.nodeid
+                for name, node in self.certificate_groups.items()
+                if node.node is not None
+            },
+            audit=self.audit,
         )
         await self.server_configuration.build()
 

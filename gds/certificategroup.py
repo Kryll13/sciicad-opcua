@@ -53,7 +53,7 @@ from typing import Optional
 from asyncua import ua
 from loguru import logger
 
-from .trustlist import MODE_READ, CertificateGroup, TrustListError
+from .trustlist import MODE_READ, CertificateGroup, TrustListError, thumbprint
 
 #: NodeIds normatifs (OPC 10000-12 §7.8.3, sous-section TrustLists §7.8.2.1).
 CERTIFICATE_GROUP_TYPE = ua.ObjectIds.CertificateGroupType          # 12555
@@ -86,6 +86,10 @@ CERTIFICATE_TYPES: dict[str, tuple[int, ...]] = {
     "DefaultHttpsGroup": (ua.ObjectIds.HttpsCertificateType,),  # 12558
     "DefaultUserTokenGroup": (19323,),  # UserCertificateType
 }
+
+#: Méthodes de la ``TrustList`` dont un succès change le contenu, et donc les
+#: seules à émettre ``TrustListUpdatedAuditEventType`` (§7.8.2.13).
+AUDITED_METHODS = frozenset({"CloseAndUpdate", "AddCertificate", "RemoveCertificate"})
 
 #: Propriétés obligatoires de l'objet ``TrustList`` : nom du nœud, champ
 #: correspondant dans :meth:`gds.trustlist.CertificateGroup.state`, et type de
@@ -139,10 +143,15 @@ class CertificateGroupNode:
     """
 
     def __init__(
-        self, server, group: Optional[CertificateGroup] = None
+        self,
+        server,
+        group: Optional[CertificateGroup] = None,
+        audit=None,
     ) -> None:
         self.server = server
         self.group = group if group is not None else CertificateGroup()
+        #: Émetteur d'audit, ou ``None`` si l'audit est désactivé.
+        self.audit = audit
         self.node = None
         self.trust_list = None
         #: Nœuds des propriétés obligatoires de la ``TrustList``.
@@ -412,8 +421,18 @@ class CertificateGroupNode:
         await node.delete()
 
         async def call(_parent, *inputs):
+            # Horodatage pris avant l'appel : c'est ce qui permet de distinguer
+            # « la liste a changé » de « la méthode a réussi sans rien
+            # modifier ». §7.8.2.13 ne demande l'événement que dans le premier
+            # cas — un AddCertificate qui ré-ajoute un certificat déjà présent
+            # est idempotent, et annoncer une mise à jour serait faux.
+            before = self.group.last_update_time
+            # Les valeurs sont déballées une fois pour toutes : l'audit doit
+            # décrire les arguments réels, et un Variant encore emballé
+            # produirait un rendu illisible là où l'empreinte est attendue.
+            plain = tuple(_plain(value) for value in inputs)
             try:
-                result = await handler(*(_plain(v) for v in inputs))
+                result = await handler(*plain)
             except TrustListError as exc:
                 # Le code est *retourné*, pas levé : asyncua enveloppe toute
                 # exception en BadUnexpectedError (address_space.py, _call),
@@ -433,6 +452,7 @@ class CertificateGroupNode:
             # rien. Ainsi, un client qui relit une propriété juste après un
             # appel réussi la trouve juste, sans tâche de fond.
             await self._publish()
+            await self._audit(name, nodeid, before, plain)
             return result
 
         await parent.add_method(
@@ -440,6 +460,31 @@ class CertificateGroupNode:
         )
         logger.debug(
             f"  {name} (i={nodeid.Identifier}) branché sur {self.group.name}"
+        )
+
+    async def _audit(self, name: str, nodeid: ua.NodeId, before, inputs) -> None:
+        """Émet ``TrustListUpdatedAuditEventType`` si la liste a changé.
+
+        §7.8.2.13 : « This event is raised when a TrustList is successfully
+        changed », par ``CloseAndUpdate``, ``AddCertificate`` ou
+        ``RemoveCertificate``. Ces trois méthodes sont les seules qui modifient
+        le contenu ; ``Open``, ``Close`` et les lectures ne changent rien et
+        n'ont donc rien à annoncer.
+
+        La comparaison se fait sur ``last_update_time`` plutôt que sur le code
+        de retour de la méthode : ``AddCertificate`` réussit aussi quand le
+        certificat était déjà présent, et cet appel n'a rien modifié. Annoncer
+        une mise à jour dans ce cas serait un faux positif d'audit.
+        """
+        if self.audit is None or name not in AUDITED_METHODS:
+            return
+        if self.group.last_update_time == before:
+            return
+        await self.audit.trust_list_updated(
+            trust_list=self.trust_list.nodeid,
+            method=nodeid,
+            arguments=f"{name}({_describe_inputs(inputs)})",
+            message=f"Liste de confiance « {self.group.name} » mise à jour par {name}",
         )
 
     # -- gestionnaires -----------------------------------------------------
@@ -495,6 +540,23 @@ class CertificateGroupNode:
 def _plain(value):
     """Retire l'éventuel ``Variant`` enveloppant une valeur d'entrée."""
     return value.Value if isinstance(value, ua.Variant) else value
+
+
+def _describe_inputs(inputs) -> str:
+    """Rendu lisible des arguments, pour la propriété ``InputArguments``.
+
+    L'audit doit permettre de rejouer l'appel. Un certificat de 800 octets
+    écrit en clair rendrait la propriété illisible et la base d'audit
+    inexploitable : les données volumineuses y sont donc remplacées par leur
+    empreinte, qui suffit à identifier l'objet sans le recopier.
+    """
+    parts = []
+    for value in inputs:
+        if isinstance(value, (bytes, bytearray)) and len(value) > 64:
+            parts.append(f"<{len(value)} octets, empreinte {thumbprint(bytes(value))[:12]}…>")
+        else:
+            parts.append(repr(value))
+    return ", ".join(parts)
 
 
 async def _child_by_name(parent, name: str):

@@ -64,6 +64,23 @@ class CertificatesConfig(BaseModel):
     hostnames: list[str] = Field(default_factory=list)
 
 
+class AuditConfig(BaseModel):
+    """Événements d'audit OPC UA, Part 12 §7.8.2.13 et §7.10.27.
+
+    À ne pas confondre avec ``database.event_log``, qui écrit des lignes dans
+    une table SQLite. Un événement d'audit est une notification OPC UA : il
+    n'atteint que les clients abonnés, avec un ``EventType`` et des propriétés
+    typées. Les deux mécanismes répondent à des questions différentes — « qu'a
+    fait le serveur ? » et « qu'est-il arrivé à ce client ? » — et un seul des
+    deux est interrogeable par un client OPC UA.
+    """
+
+    #: Publier ``TrustListUpdatedAuditEventType`` et
+    #: ``CertificateUpdatedAuditEventType``. Actif par défaut : sans lui, une
+    #: modification de la liste de confiance est silencieuse pour tout client.
+    enabled: bool = True
+
+
 class GDSConfig(LDSConfig):
     """Configuration d'un GDS : portée globale, endpoint dédié.
 
@@ -75,6 +92,8 @@ class GDSConfig(LDSConfig):
     config_filename: ClassVar[str] = DEFAULT_CONFIG_FILENAME
 
     certificates: CertificatesConfig = Field(default_factory=CertificatesConfig)
+
+    audit: AuditConfig = Field(default_factory=AuditConfig)
 
     server: ServerConfig = Field(
         default_factory=lambda: ServerConfig(

@@ -140,6 +140,61 @@ découverte précède l'établissement d'un canal sécurisé, et la Part 4 impos
 que ces services n'exigent pas la sécurité des messages. La gestion des
 certificats est donc une couche distincte, au-dessus.
 
+## Journalisation
+
+**loguru est la seule bibliothèque de journalisation du projet.** Aucune ligne de
+`print()` ne sert de journal : la sortie standard est réservée à l'affichage
+interactif — `ihm/ihm_client.py` rafraîchit une ligne pour un humain.
+
+Deux `import logging` subsistent, dans `sciicad/console.py` et `lds/services.py`.
+Ils ne sont pas des exceptions à la règle mais son **mécanisme** : ils
+redirigent les journaux d'asyncua vers loguru, de sorte qu'une seule
+configuration de sortie et un seul format s'appliquent à tout. Les retirer
+ferait revenir les journaux de la pile vers le module `logging` de la
+bibliothèque standard, et le GDS émettrait alors deux flux de formats
+différents. Ce ne sont pas des lignes à « nettoyer ».
+
+## Audit OPC UA et journal d'événements : deux choses distinctes
+
+La configuration du GDS porte deux clés qui se ressemblent et ne répondent pas
+à la même question.
+
+| Clé                  | Mécanisme                         | Qui le voit                    |
+|----------------------|-----------------------------------|--------------------------------|
+| `database.event_log` | lignes dans une table SQLite     | l'administrateur, sur la machine |
+| `audit.enabled`      | notification OPC UA, avec `EventType` | un client OPC UA **abonné**   |
+
+Un journal d'événements répond à « qu'a fait le serveur ? ». Un événement
+d'audit répond à « qu'est-il arrivé à ce certificat, à cette liste de
+confiance ? », et ne parvient qu'aux clients qui se sont abonnementés. Confondre
+les deux laisse croire qu'une traçabilité existe parce qu'il y a des lignes dans
+un fichier : c'est faux pour tout client OPC UA, et c'est ce qui rendait le
+premier état des lieux de cette couche trompeur.
+
+Le GDS émet deux `ObjectType` d'audit, tous deux à leurs NodeIds publiés :
+
+| `EventType`                             | NodeId | Émis quand                              |
+|------------------------------------------|--------|-----------------------------------------|
+| `TrustListUpdatedAuditEventType`        | 12561  | la liste de confiance a réellement changé |
+| `CertificateUpdatedAuditEventType`      | 12620  | un certificat a été installé            |
+
+§7.8.2.13 et §7.10.27 sont explicites sur un point que le test vérifie : un
+`AddCertificate` **idempotent**, ou un `UpdateCertificate` **refusé**, ne
+produisent aucun événement. Le premier réussit sans rien modifier, le second
+échoue — « No Event is raised if the Method call fails. »
+
+Une émission d'audit qui échoue est journalisée et n'interrompt pas l'opération.
+C'est un effet de bord, jamais une condition : l'inverse rendrait l'audit capable
+de refuser une écriture de liste de confiance, ce qui est pire que l'absence de
+trace.
+
+> Un défaut d'asyncua 1.1.8 a été contourné, sans modification de la pile :
+> `get_event_obj_from_type_node` pose `EventType` par affectation directe au
+> lieu de `add_property`, le type de la donnée n'est donc pas enregistré, et la
+> notification se perd à la sérialisation — sans message pour le client. Le
+> défaut est isolé : un `BaseEvent` nu, construit explicitement, est livré
+> correctement. Voir la note de `gds/audit.py`.
+
 ## Recommandations
 
 - Ne jamais committer `server_private_key.pem` (ignorés via `.gitignore` /
