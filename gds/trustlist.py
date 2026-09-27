@@ -18,7 +18,7 @@ transporter.
 Deux règles de sûreté, non optionnelles :
 
 * ``Open`` en lecture seule ne doit pas autoriser l'écriture, sinon un client
-  qui只想 lire peut réécrire la liste de confiance. Le mode d'ouverture
+  qui ne veut que lire peut réécrire la liste de confiance. Le mode d'ouverture
   conditionne donc ``Write`` et ``AddCertificate``.
 * ``OpenCount`` doit être décrémenté par ``Close``. Un client qui ouvre sans
   fermer bloquerait la liste pour tous les suivants ; la norme prévoit ce

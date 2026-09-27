@@ -23,17 +23,33 @@ GDS_ENDPOINT_PATH = "GlobalDiscoveryServer"
 
 
 class CertificatesConfig(BaseModel):
-    """Certificats publiés par le GDS (Part 12 §7.8).
+    """Certificats publiés et gérés par le GDS (Part 12 §7.8 et §7.10).
 
     Le GDS est une autorité de distribution : il expose un ou plusieurs
-    groupes de certificats, chacun portant sa propre liste de confiance. Un
-    groupe absent est un groupe vide, ce qui est conforme : un GDS qui n'a
+    groupes de certificats, chacun portant sa propre liste de confiance (§7.8).
+    Un groupe absent est un groupe vide, ce qui est conforme : un GDS qui n'a
     encore distribué aucun certificat n'a rien à annoncer.
+
+    Il tient en outre le rôle *CertificateManager* (§7.1) : préparer une demande
+    de signature et installer le certificat signé (§7.10). Ce rôle est
+    désactivable, car un déploiement peut vouloir distribuer des listes de
+    confiance sans exposer la gestion de certificats.
     """
 
     #: Groupes publiés au démarrage. Le premier est le groupe d'application,
     #: celui que les serveurs OPC UA eux-mêmes utilisent.
     groups: list[str] = Field(default_factory=lambda: ["DefaultApplicationGroup"])
+
+    #: Publier l'objet ``ServerConfiguration`` et ses méthodes de signature.
+    manage_certificates: bool = True
+
+    #: Taille des clés générées par ``CreateSigningRequest``, en bits.
+    key_size: int = Field(default=2048, ge=2048, le=4096)
+
+    #: Noms d'hôte ajoutés au SAN des demandes de signature, en plus de l'URI
+    #: d'application. Vide par défaut : c'est à l'administrateur de dire quelle
+    #: identité le GDS doit annoncer.
+    hostnames: list[str] = Field(default_factory=list)
 
 
 class GDSConfig(LDSConfig):

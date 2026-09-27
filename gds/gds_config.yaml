@@ -51,3 +51,20 @@ certificates:
   groups:
     - DefaultApplicationGroup
 
+  # Publier l'objet ServerConfiguration et ses methodes de signature
+  # (Part 12 §7.10), qui font du GDS un CertificateManager : il prepare une
+  # demande de signature, conserve la cle, et installe le certificat signe par
+  # une autorite d'enregistrement exterieure.
+  #
+  # Le GDS ne possede donc aucune cle de CA. Mettre a false si le
+  # deploiement distribue des listes de confiance sans gerer de certificats.
+  manage_certificates: true
+
+  # Taille des cles generees par CreateSigningRequest, en bits (2048..4096).
+  key_size: 2048
+
+  # Noms d'hote ajoutes au SAN des demandes de signature, en plus de l'URI
+  # d'application. Vide par defaut : c'est a l'administrateur de dire quelle
+  # identite le GDS doit annoncer.
+  hostnames: []
+

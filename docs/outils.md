@@ -216,6 +216,32 @@ bloc, un `Open` en lecture seule refuse `Write` avec `BadNotWritable`,
 `OpenWithMasks` ne livre que les listes demandées, et un `FileHandle` inconnu
 donne `BadInvalidArgument`.
 
+### `selftest_certmanager.py` — rôle CertificateManager du GDS (Part 12 §7.10)
+
+Interroge l'objet `ServerConfiguration` **par le réseau**. Le test fabrique sa
+propre autorité de certification pour signer, puisque le GDS n'en détient
+aucune : le cycle testé est donc le cycle réel de la norme, demande de signature
+puis installation du certificat signé.
+
+```bash
+uv run tools/selftest_certmanager.py
+```
+
+Vérifié notamment : l'objet est bien l'instance normative i=12637 et il n'en
+existe qu'une seule ; les trois méthodes ont la signature normative, entrées et
+sorties ; la PKCS #10 produite est réellement exploitable et porte l'URI
+d'application ; un certificat d'une autorité de confiance est accepté ; un
+`Nonce` trop court, un certificat expiré, un certificat portant une autre URI, un
+certificat d'une autorité non approuvée et un DER illisible sont chacun refusés
+avec leur `StatusCode` normatif ; `GetRejectedList` restitue exactement les
+quatre refus.
+
+> Une vérification vaut mieux qu'un test : le nombre d'objets
+> `ServerConfiguration` est vérifié explicitement, parce que le câblage initial
+> en créait un second — invisible pour un test qui vise un NodeId, mais fatal
+> pour un client qui parcourt l'espace d'adressage et trouverait le premier des
+> deux, non câblé.
+
 ### `selftest_thermo_lifecycle.py` — cycle de vie réel (SIGTERM)
 
 Lance un PLC dans un vrai sous-processus face à un LDS, puis envoie `SIGTERM`

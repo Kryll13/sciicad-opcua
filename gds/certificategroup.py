@@ -37,7 +37,7 @@ from loguru import logger
 
 from .trustlist import MODE_READ, CertificateGroup, TrustListError
 
-#: NodeIds normatifs (OPC 10000-12 §7.8.2, schéma 1.05).
+#: NodeIds normatifs (OPC 10000-12 §7.8.3, sous-section TrustLists §7.8.2.1).
 CERTIFICATE_GROUP_TYPE = ua.ObjectIds.CertificateGroupType          # 12555
 
 #: Base de la plage privée des instances. Les NodeIds d'instance n'ont aucune

@@ -46,7 +46,7 @@ L'IHM et les outils se connectent directement aux serveurs concernés.
 > **À noter** : la norme OPC UA ne définit aucun service de désenregistrement
 > d'un serveur auprès d'un LDS. Une entrée disparaît parce que le serveur
 > cesse de se réenregistrer et que le LDS l'évince, pas parce qu'il se
-> désinscrit. Voir [`docs/serveurs.md`](docs/serveurs.md#lds--local-discovery-server-lds).
+> désinscrit. Voir [`docs/serveurs.md`](docs/serveurs.md#lds-local-discovery-server-lds).
 
 ## Composants
 

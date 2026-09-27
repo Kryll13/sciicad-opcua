@@ -57,7 +57,7 @@ découverte de la Part 4 :
 entrée est au contraire la durée du renouvellement, puis l'éviction par TTL
 (`discovery.entry_ttl_seconds`, 300 s par défaut). Le registre est persisté
 dans SQLite et survit au redémarrage du LDS. Voir
-[`docs/serveurs.md`](serveurs.md#lds--local-discovery-server-lds).
+[`docs/serveurs.md`](serveurs.md#lds-local-discovery-server-lds).
 
 Les PLC appellent `server.register_to_discovery(lds_url, 60)` au démarrage :
 cet appel est **périodique** (renouvellement toutes les 60 s). L'appel

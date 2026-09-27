@@ -132,6 +132,60 @@ Deux règles de sûreté, vérifiées par `tools/selftest_trustlist.py` :
 `AddCertificate` est idempotent : l'appartenance est déduite de l'empreinte du
 certificat, pas d'une table d'index, donc ré-ajouter ne crée pas de doublon.
 
+### Rôle CertificateManager (Part 12 §7.10)
+
+Le GDS tient en outre le rôle de *CertificateManager* (§7.1) : il prépare une
+demande de signature et installe le certificat signé. Il **n'est pas** une autorité
+de certification et ne détient aucune clé de CA — la signature est faite par une
+autorité d'enregistrement extérieure, comme le suppose §7.10.5 en décrivant le
+certificat reçu comme étant signé et non produit par le serveur.
+
+L'objet `ServerConfiguration` est déjà publié par asyncua au NodeId normatif
+i=12637 ; le GDS s'y **rattache** plutôt que d'en créer un second, faute de quoi
+un client parcourant l'espace d'adressage trouverait deux objets de même browse
+name, dont le premier répondrait `BadNothingToDo`.
+
+| Méthode                        | Effet                                                     |
+|--------------------------------|-----------------------------------------------------------|
+| `CreateSigningRequest`         | produit une PKCS #10 DER et retient la clé privée         |
+| `UpdateCertificate`            | valide puis installe le certificat signé                   |
+| `GetRejectedList`              | restitue les certificats refusés, en DER                   |
+
+La validation suit le processus de la Part 4 — validité, `BasicConstraints`,
+`KeyUsage`, URI d'application dans le SAN, et surtout chaîne de signature — et
+chaque refus porte son `StatusCode` normatif :
+
+| Cas                                   | `StatusCode`              |
+|---------------------------------------|---------------------------|
+| `Nonce` de moins de 32 octets         | `BadInvalidArgument`      |
+| certificat expiré ou pas encore valide | `BadCertificateTimeInvalid` |
+| URI d'application absente du SAN       | `BadCertificateUriInvalid` |
+| autorité de signature non approuvée    | `BadCertificateUntrusted` |
+| DER illisible, clé privée incohérente | `BadCertificateInvalid`   |
+| `CertificateGroupId` inconnu          | `BadNodeIdUnknown`        |
+
+La chaîne d'émetteurs fournie avec `UpdateCertificate` est versée dans la liste
+`issuer_certificates` du groupe, comme l'exige §7.10.5 : la validation suppose que
+les certificats d'émetteur figurent **déjà** dans la liste de confiance, faute de
+quoi elle ne pourrait aboutir.
+
+Un `CertificateGroupId` nul désigne le `DefaultApplicationGroup`. Tout autre
+NodeId qui ne correspond à aucun groupe publié est **refusé** et non redirigé
+vers le groupe par défaut : un certificat déplacé à l'insu du client serait
+piresque.
+
+Désactivable par `certificates.manage_certificates: false`, pour un déploiement
+qui distribue des listes de confiance sans gérer de certificats.
+
+`ApplyChanges`, `CancelChanges`, `ResetToServerDefaults` et `GetCertificates`
+restent des méthodes générées **sans gestionnaire**, et répondent donc
+`BadNothingToDo`. Elles appartiennent au modèle transactionnel du §7.10 ;
+ce GDS applique ses changements immédiatement. Les câbler à vide donnerait un
+`Good` trompeur — pire que le refus.
+
+Vérifié par `tools/selftest_certmanager.py` (32 vérifications, dont 5 sur la
+validation et le refus).
+
 ### `gds/gds_server.py` — prototype non exposé
 
 Ce fichier (2126 lignes) reste dans le dépôt mais **n'est plus le point
@@ -145,9 +199,21 @@ appelle, un `FindServers` standard ne renvoyait que le GDS lui-même, et un
 Sa couche certificats (registre SQLAlchemy, CA, groupes de confiance, audit)
 n'a jamais été atteignable non plus. Elle reste la base de la Part 11/12 : en
 revanche, la gestion des listes de confiance est désormais exposée
-conformément, via `gds/trustlist.py` et `gds/certificategroup.py`. Ce qui reste
-à faire concerns l'**autorité de certification** elle-même : émettre des
-certificats signés, approuver les demandes, distribuer les CRL.
+conformément, via `gds/trustlist.py` et `gds/certificategroup.py`, et le rôle de
+*CertificateManager* via `gds/certstore.py` et `gds/serverconfiguration.py`.
+
+Ce qui reste hors de portée, et pour une raison qui n'est pas un choix : la
+ Part 12 définit en §7.9 un modèle *Pull* d'autorité de certification, autour
+d'un `CertificateDirectoryType` et de ses neuf méthodes
+(`StartSigningRequest`, `FinishRequest`, `GetTrustList`…). **Ces NodeIds ne sont
+pas publiés** — ils sont absents du `NodeIds.csv` de la Fondation OPC elle-même,
+pas seulement d'asyncua. Les implémenter demanderait donc d'inventer des NodeIds,
+c'est-à-dire de reproduire exactement le défaut reproché plus haut à ce
+prototype. Le modèle *Push* du §7.10, lui, est intégralement normé et c'est lui
+qui est implémenté.
+
+Reste donc à faire, si le besoin se présente : la distribution des CRL, et le
+modèle transactionnel du §7.10 (`ApplyChanges`, `ResetToServerDefaults`).
 
 ## thermo-plc — PLC Thermostat (`thermo-plc/`)
 

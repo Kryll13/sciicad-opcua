@@ -77,9 +77,31 @@ Elle suit le modèle fichier de la Part 12 §7.8.2, sous les NodeIds normatifs d
 donc déjà ses groupes de certificats, et un client peut lire et modifier leurs
 listes de confiance par `Open`/`Read`/`Write`/`AddCertificate`.
 
-Ce qui reste à faire : l'autorité de certification elle-même — émettre des
-certificats signés, approuver les demandes, distribuer les CRL. Le code de
-`gds_server.py` en est la base, mais son exposition reste à refaire.
+**Le rôle de *CertificateManager* l'est aussi** (§7.10, modèle *Push*) : l'objet
+`ServerConfiguration` est publié au NodeId normatif i=12637, et
+`CreateSigningRequest`, `UpdateCertificate` et `GetRejectedList` y sont câblées.
+Voir [`serveurs.md`](serveurs.md#role-certificatemanager-part-12-710).
+
+> **Le GDS n'est pas une autorité de certification et n'en tient pas le rôle.**
+> Il prépare une demande de signature et installe le certificat *signé par une
+> autorité extérieure* ; il ne détient aucune clé de CA et ne peut donc pas
+> signer lui-même. C'est ce que prescrit §7.10.5, qui décrit le certificat reçu
+> comme signé et non produit par le serveur.
+
+La validation d'un certificat entrant applique le processus de la Part 4 et
+n'accepte que si la chaîne de signature remonte à un certificat de confiance du
+groupe — la liste `issuer_certificates` doit donc contenir l'autorité de
+signature **avant** l'appel. À défaut, tout est refusé : c'est le seul
+comportement sûr, accepter reviendrait à installer un certificat dont personne
+n'a vérifié l'origine.
+
+Le modèle *Pull* d'autorité de certification (§7.9, `CertificateDirectoryType`)
+n'est **pas** implémenté, et ne peut pas l'êtreconformément : ses NodeIds ne
+sont pas publiés par la Fondation OPC. Voir
+[`serveurs.md`](serveurs.md#gdsgds_serverpy-prototype-non-expose).
+
+Ce qui reste à faire : la distribution des CRL, et le modèle transactionnel du
+§7.10.
 
 Configuration prévue (`gds/gds_config.yaml` du prototype) :
 
