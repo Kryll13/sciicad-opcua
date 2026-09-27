@@ -17,6 +17,8 @@ production n'est touché.
 
 import asyncio
 import sqlite3
+import subprocess
+from pathlib import Path
 import sys
 
 from asyncua import Client, Server, ua
@@ -205,7 +207,98 @@ async def main() -> int:
                 for plc in servers:
                     await plc.stop()
 
+    report.section("6. Journalisation : toute la verbosité passe par loguru")
+    _check_logging(report)
+
     return report.finish()
+
+
+#: Répertoires dont la sortie doit passer exclusivement par loguru. Un serveur
+#: ou un simulateur qui écrit aussi en ``print`` oblige l'administrateur à deux
+#: outils pour lire une seule vie du processus.
+_LOGGED_ROLES = ("lds", "gds", "thermo-plc", "protect-plc", "sciicad")
+
+#: Fichiers exclus du contrôle : ``gds_server.py`` est le prototype de 2126
+#: lignes, hors point d'entrée depuis le commit cf94fa4.
+_SCAN_SUFFIX = ".py"
+
+
+def _check_logging(report: Report) -> None:
+    """Vérifie l'invariant de journalisation, et le réglage du niveau.
+
+    L'invariant est contrôlé sur les **sources**, pas sur une exécution : un
+    ``print`` ajouté dans une branche rare ne se voit pas en lançant le
+    serveur, alors qu'il se voit en lisant la ligne.
+    """
+    root = Path(__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for folder in _LOGGED_ROLES:
+        for path in sorted((root / folder).rglob(f"*{_SCAN_SUFFIX}")):
+            if path.name == "gds_server.py":
+                continue
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                # On écarte les faux positifs : « thumbprint( » contient
+                # « print( », et un motif naïf le signalerait.
+                stripped = line.lstrip()
+                if not stripped.startswith("print(") and "sys.stdout.write" not in stripped:
+                    continue
+                offenders.append(f"{path.relative_to(root)}:{number}")
+    report.check(
+        "aucun print dans les rôles journalisés",
+        not offenders,
+        ", ".join(offenders) if offenders else f"{len(_LOGGED_ROLES)} répertoires",
+    )
+
+    from sciicad.console import LOG_LEVELS, check_level, setup_server
+
+    report.check(
+        "check_level normalise la casse",
+        check_level("debug") == "DEBUG",
+        check_level("debug"),
+    )
+    report.check(
+        "check_level refuse un niveau inconnu",
+        _raises(lambda: check_level("VERBOSE")),
+        "ValueError levée",
+    )
+    report.check(
+        "les niveaux annoncés sont ceux acceptés",
+        set(LOG_LEVELS) == {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+        ", ".join(LOG_LEVELS),
+    )
+    # L'option doit exister sur les quatre rôles, et pas seulement sur le LDS :
+    # c'est la régression à voir, celle d'un rôle oublié.
+    for label, argv in (
+        ("python -m lds", ["-m", "lds", "--help"]),
+        ("python -m gds", ["-m", "gds", "--help"]),
+        ("thermo-plc", ["thermo-plc/plc_server.py", "--help"]),
+        ("protect-plc", ["protect-plc/plc_server.py", "--help"]),
+    ):
+        result = subprocess.run(
+            [sys.executable, *argv], capture_output=True, text=True, cwd=root
+        )
+        help_text = result.stdout + result.stderr
+        report.check(
+            f"--log-level exposé par {label}",
+            "--log-level" in help_text,
+            "présent" if "--log-level" in help_text else "absent",
+        )
+
+    # Sans second plan : reconfigurer loguru ici laisserait les sorties
+    # suivantes sans gestionnaire, puisque l'auto-test journalise aussi.
+    setup_server("INFO")
+
+
+def _raises(action) -> bool:
+    try:
+        action()
+    except ValueError:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def _is_gone(lds, uri: str) -> bool:

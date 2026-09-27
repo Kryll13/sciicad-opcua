@@ -19,6 +19,7 @@ from asyncua.common.node import Node
 from loguru import logger
 
 from sciicad.cli import add_plc_arguments
+from sciicad.console import setup_server
 from sciicad.discovery import LdsRegistrar
 from sciicad.identity import set_application_identity
 from sciicad.lifecycle import install_signal_handlers, run_until_stopped, withdraw_from_lds
@@ -221,6 +222,10 @@ if __name__ == "__main__":
         )
     )
     args = parser.parse_args()
+
+    # Toute la verbosité passe par loguru : le niveau se règle ici, et nulle
+    # part ailleurs dans le processus.
+    setup_server(args.log_level)
 
     try:
         asyncio.run(main(args.port, args.lds, args.bind, args.advertise))

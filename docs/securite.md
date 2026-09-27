@@ -142,17 +142,47 @@ certificats est donc une couche distincte, au-dessus.
 
 ## Journalisation
 
-**loguru est la seule bibliothèque de journalisation du projet.** Aucune ligne de
-`print()` ne sert de journal : la sortie standard est réservée à l'affichage
-interactif — `ihm/ihm_client.py` rafraîchit une ligne pour un humain.
+**Toute la verbosité des rôles en service — LDS, GDS, les deux simulateurs PLC —
+passe par loguru.** Aucun `print()` : la sortie standard est réservée à
+l'affichage interactif d'un client, où un humain lit un écran. Un serveur qui
+écrit deux flux oblige l'administrateur à deux outils pour lire une seule vie du
+processus.
 
-Deux `import logging` subsistent, dans `sciicad/console.py` et `lds/services.py`.
-Ils ne sont pas des exceptions à la règle mais son **mécanisme** : ils
-redirigent les journaux d'asyncua vers loguru, de sorte qu'une seule
-configuration de sortie et un seul format s'appliquent à tout. Les retirer
-ferait revenir les journaux de la pile vers le module `logging` de la
-bibliothèque standard, et le GDS émettrait alors deux flux de formats
-différents. Ce ne sont pas des lignes à « nettoyer ».
+Le niveau se règle par `--log-level`, sur les quatre rôles :
+
+```bash
+python -m lds                      --log-level DEBUG
+python -m gds                      --log-level DEBUG
+python thermo-plc/plc_server.py    --log-level DEBUG
+python protect-plc/plc_server.py   --log-level DEBUG
+```
+
+Niveaux acceptés : `TRACE`, `DEBUG`, `INFO` (défaut), `WARNING`, `ERROR`,
+`CRITICAL`. Un niveau inconnu est **refusé à la ligne de commande** : un
+`--log-level VERBOSE` accepté puis jamais atteint laisserait croire à un
+réglage qu'il n'a pas.
+
+**Deux formats, pour deux lecteurs.** `sciicad/console.py` expose deux fonctions
+et non une avec un paramètre de plus : `setup()` pour les outils de diagnostic,
+au message seul, parce qu'un rapport n'a pas besoin d'horodatage ligne à ligne ;
+`setup_server()` pour les rôles en service, horodaté et gradé, parce que
+l'exploitant lit une trace a posteriori et a besoin du *quand* et de la
+gravité. Appliquer le format nu des outils à un serveur ferait perdre
+l'information la plus utile en cas d'incident.
+
+Les deux `import logging` qui subsistent — dans `sciicad/console.py` et
+`lds/services.py` — ne sont pas des exceptions à la règle mais son **mécanisme** :
+ils redirigent les journaux d'asyncua vers loguru. Les retirer ferait revenir la
+pile vers le module `logging` de la bibliothèque standard, et le serveur
+émettrait alors deux flux de formats différents. Ce ne sont pas des lignes à
+« nettoyer ».
+
+> L'invariant est vérifié sur les **sources**, pas sur une exécution : un
+> `print` ajouté dans une branche rare ne se voit pas en lançant le serveur.
+> `tools/selftest_lds.py` parcourt `lds/`, `gds/`, `thermo-plc/`,
+> `protect-plc/` et `sciicad/`, et signale le fichier et la ligne. Un motif naïf
+> signalait `thumbprint(` ; le contrôle écarte le cas où `print(` n'est pas en
+> début de ligne.
 
 ## Audit OPC UA et journal d'événements : deux choses distinctes
 

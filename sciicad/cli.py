@@ -57,6 +57,38 @@ def lds_url(value: str) -> str:
     return value
 
 
+def log_level(value: str) -> str:
+    """Valide un niveau de journalisation pour ``--log-level``.
+
+    Toute la verbosité des serveurs et des simulateurs passe par loguru, donc
+    le niveau doit se régler ici et nulle part ailleurs. Un niveau arbitraire
+    serait silencieusement accepté puis jamais atteint : mieux vaut un refus à
+    la ligne de commande qu'un ``--log-level VERBOSE`` qui n'verbe pas.
+    """
+    from sciicad.console import LOG_LEVELS, check_level
+
+    try:
+        return check_level(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def add_log_level(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Ajoute ``--log-level``, commun à tous les rôles en service."""
+    parser.add_argument(
+        "--log-level",
+        type=log_level,
+        default="INFO",
+        metavar="NIVEAU",
+        help=(
+            "niveau de journalisation loguru : "
+            "TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL (défaut : INFO). "
+            "Toute la verbosité passe par loguru."
+        ),
+    )
+    return parser
+
+
 def add_plc_arguments(
     parser: argparse.ArgumentParser,
     default_lds: str = "opc.tcp://lds:4840",
@@ -92,6 +124,7 @@ def add_plc_arguments(
             "Sur une VM, renseigner une IP joignable par les clients."
         ),
     )
+    add_log_level(parser)
     return parser
 
 
@@ -156,6 +189,7 @@ def add_discovery_arguments(
         action="store_true",
         help="désactive la persistance (registre en mémoire seule)",
     )
+    add_log_level(parser)
     return parser
 
 

@@ -2,6 +2,7 @@
 
     python -m lds [--config lds_config.yaml] [--port 4840]
                   [--bind 0.0.0.0] [--advertise <hôte>] [--no-database]
+                  [--log-level DEBUG]
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import sys
 
 from loguru import logger
 from sciicad.cli import add_discovery_arguments, load_discovery_config
+from sciicad.console import setup_server
 
 from .config import DEFAULT_CONFIG_FILENAME, LDSConfig
 from .server import LocalDiscoveryServer
@@ -40,14 +42,15 @@ def build_config(args: argparse.Namespace) -> LDSConfig:
 
 async def _main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # Avant toute journalisation : une erreur de configuration doit être
+    # rapportée au niveau demandé, pas au format par défaut de loguru.
+    setup_server(args.log_level)
+
     try:
         config = build_config(args)
     except Exception as exc:
         logger.error(f"Configuration invalide : {exc}")
         return 2
-
-    logger.remove()
-    logger.add(sys.stderr, level="INFO")
 
     # Toujours dire d'où vient la configuration : une valeur par défaut
     # appliquée silencieusement est indétectable le jour où le YAML diverge.

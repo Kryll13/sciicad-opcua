@@ -168,9 +168,15 @@ distingue le GDS du LDS.
 | `--lds URL`     | `opc.tcp://lds:4840`     | LDS d'enregistrement ; `none` ou vide pour désactiver  |
 | `--bind`        | `0.0.0.0`                | adresse d'écoute                                        |
 | `--advertise`   | IP détectée              | hôte annoncé aux clients et au LDS                      |
+| `--log-level`   | `INFO`                   | niveau loguru : `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 `--port` et `--lds` sont validés : un port hors plage ou une URL sans schéma
-`opc.tcp://` est refusé au lancement, avec un code de sortie non nul.
+`opc.tcp://` est refusé au lancement, avec un code de sortie non nul. Il en va de
+même d'un niveau de journalisation inconnu.
+
+`--log-level` est accepté par **les quatre rôles en service** — le LDS, le GDS
+et les deux simulateurs. Toute leur verbosité passe par loguru, aucun `print` :
+voir [`securite.md`](securite.md#journalisation).
 
 **`--bind` et `--advertise` sont découplés volontairement.** Le serveur écoute
 sur `--bind` et annonce `--advertise`. Lier l'adresse déduite du hostname fait
