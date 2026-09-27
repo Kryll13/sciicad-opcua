@@ -164,10 +164,62 @@ valeur est donc exacte sans tâche de fond.
 | `OpenCount`      | nombre de poignées valides                |
 | `LastUpdateTime` | `DateTime.MinValue` tant que la liste n'a pas bougé — §7.8.3.1 l'exige après un redémarrage, cette liste vivant en mémoire et repartant vide |
 
-`UpdateFrequency`, `ActivityTimeout` et `DefaultValidationOptions` sont
-optionnelles et ne sont pas publiées. `DefaultValidationOptions` est pourtant la
-pièce qui manque le plus : ses sept bits (`SuppressCertificateExpired`,
-`CheckRevocationStatusOnline`…) sont le levier prévu pour la révocation.
+`UpdateFrequency` et `ActivityTimeout` sont optionnelles et ne sont pas
+publiées. `DefaultValidationOptions`, elle, l'est : c'est le seul endroit où la
+norme dit quelles options appliquer « when validating Certificates with the
+TrustList », et sans elle la révocation resterait hors d'atteinte.
+
+### Révocation — Part 12 §7.8.2.10
+
+| Élément | NodeId |
+|---------|--------|
+| `TrustListType.DefaultValidationOptions` | 23563 |
+| `TrustListValidationOptions` (DataType) | 23564 |
+| `TrustListValidationOptions.OptionSetValues` | 23565 |
+
+Les trois sont publiés par la Fondation OPC. La propriété est **optionnelle** au
+sens de Table 27, donc absente de l'instance construite par asyncua : le GDS la
+crée, dans une plage de NodeIds privée — i=23563 étant déjà pris par la
+déclaration de la propriété sur le `TrustListType` lui-même.
+
+| Drapeau | Bit | Effet implanté |
+|---------|-----|----------------|
+| `SuppressCertificateExpired` | 0 | l'expiration du certificat ne bloque plus |
+| `SuppressHostNameInvalid` | 1 | l'URI d'application absente ne bloque plus |
+| `SuppressRevocationStatusUnknown` | 2 | l'absence de CRL ne bloque plus |
+| `SuppressIssuerCertificateExpired` | 3 | — vise l'émetteur, non implémenté |
+| `SuppressIssuerRevocationStatusUnknown` | 4 | — vise l'émetteur, non implémenté |
+| `CheckRevocationStatusOnline` | 5 | **non implanté**, et dit comme tel |
+| `CheckRevocationStatusOffline` | 6 | la CRL de l'émetteur est consultée |
+
+> `CheckRevocationStatusOnline` poserait une interrogation OCSP à chaque
+> présentation. Un serveur de découverte qui sort sur le réseau pour cela, et
+> dont l'échec serait silencieux, donnerait un sentiment de sécurité que rien
+> ne justifie. Le bit n'est donc pas honoré — et c'est écrit, parce qu'un
+> administrateur qui le poserait croirait le contraire.
+
+**Le défaut de la norme est fermé, et c'est un changement de comportement.**
+§7.8.2.10 fixe `CheckRevocationStatusOffline` comme seule valeur initiale. Un
+certificat signé par un émetteur de confiance **dont aucune CRL n'est connue** a
+donc un état de révocation *inconnu*, que la Part 4 fait échouer : il est refusé
+avec `Bad_CertificateRevoked`. Avant cette propriété, ces certificats étaient
+acceptés. diffuser des CRL n'est donc plus facultatif — sauf à poser
+`SuppressRevocationStatusUnknown`, qui est précisément le levier prévu pour un
+déploiement qui ne gère pas la révocation.
+
+Une CRL n'est appliquée que si son émetteur correspond à celui qui a signé le
+certificat. Une CRL d'une autre autorité est donc sans effet, ce qui empêche une
+révocation sans rapport de devenir un déni de service.
+
+**Diffuser une CRL** passe par le seul chemin que la norme offre : `Open` en
+écriture, `Write`, `CloseAndUpdate`. Il n'existe aucun `AddCrl`, et
+l'agencement de `Write` est donc nécessaire — une écriture bornée à la taille
+d'origine rendrait les listes immuples.
+
+Vérifié par `tools/selftest_revocation.py` (14 vérifications) : la propriété et
+son DataType, la diffusion d'une CRL par `Write`, le refus sans CRL, l'acceptation
+avec CRL vide, le refus `Bad_CertificateRevoked` d'un certificat listé, l'inefficacité
+d'une CRL d'une autre autorité, et les deux drapeaux de suppression.
 
 Deux règles de sûreté, vérifiées par `tools/selftest_trustlist.py` :
 

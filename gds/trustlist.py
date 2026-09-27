@@ -82,6 +82,19 @@ MAX_READ_CHUNK = 8192
 #: n'a pas eu lieu.
 DATE_MIN = datetime(1601, 1, 1, tzinfo=timezone.utc)
 
+#: Valeur par défaut de ``DefaultValidationOptions``, §7.8.2.10 : « The default
+#: value for this DataType only has the CheckRevocationStatusOffline bit set. »
+#:
+#: Ce défaut est **fermé**, et il faut le savoir : avec ce seul bit, un
+#: certificat signé par un émetteur de confiance dont aucune CRL n'est connue a
+#: un état de révocation *inconnu*, donc refusé — sauf si
+#: ``SuppressRevocationStatusUnknown`` est posé. Publier la propriété rend donc
+#: la distribution des CRL obligatoire, ce qui est le but, mais c'est un
+#: changement de comportement notable pour un déploiement qui n'en diffuse pas.
+DEFAULT_VALIDATION_OPTIONS = int(
+    ua.TrustListValidationOptions.CheckRevocationStatusOffline
+)
+
 
 class TrustListError(ua.UaError):
     """Erreur fonctionnelle de la liste de confiance."""
@@ -160,6 +173,10 @@ class CertificateGroup:
     issuer_crls: list[bytes] = field(default_factory=list)
     last_update_time: datetime = field(default_factory=lambda: DATE_MIN)
 
+    #: Drapeaux de validation, §7.8.2.10. Un ensemble de bits, pas une
+    #: énumération : la norme les définit en OptionSet.
+    default_validation_options: int = DEFAULT_VALIDATION_OPTIONS
+
     # Verrou : les méthodes d'une liste de confiance sont appelables depuis
     # plusieurs sessions à la fois, et le modèle fichier expose une position
     # courante par ouverture.
@@ -185,7 +202,11 @@ class CertificateGroup:
           être plus restrictives tant que le modèle de rôles du §7.2 n'est pas
           implanté — voir la note de ``_publish_properties``.
         * ``open_count`` est le nombre de poignées valides, que la Part 20
-          définit comme « the number of currently valid file handles ».
+          définit comme « the number of currently valid file handles » ;
+        * ``default_validation_options`` est le drapeau que la Part 12 §7.8.2.1
+          nomme « the default options to use when validating Certificates with
+          the TrustList ». Il est ici parce que c'est le seul endroit qui sait
+          quelles listes la validation doit consulter.
         """
         with self._lock:
             return {
@@ -194,6 +215,7 @@ class CertificateGroup:
                 "user_writable": True,
                 "open_count": len(self._handles),
                 "last_update_time": self.last_update_time,
+                "default_validation_options": self.default_validation_options,
             }
 
     def lists(self, masks: int = ua.TrustListMasks.All) -> dict[str, list[bytes]]:
@@ -331,9 +353,17 @@ class CertificateGroup:
     def write(self, handle: int, data: bytes) -> int:
         """Écrit ``data`` à la position courante. Retourne le nombre d'octets.
 
-        L'écriture est bornée au fichier déjà ouvert : on ne peut pas ajouter
-        des octets au-delà de la taille connue, ce qui laisserait un tampon
-        incohérent avec les listes sous-jacentes.
+        L'écriture **peut agrandir le fichier**, et c'est nécessaire : c'est le
+        seul chemin normatif pour ajouter une CRL ou un certificat à une liste.
+        La Part 12 ne définit aucune méthode ``AddCrl`` — le contenu transite par
+        ``Write`` puis ``CloseAndUpdate``. Une écriture bornée à la taille
+        d'origine rendrait les listes immuables, donc la révocation
+        indiffusable et la propriété ``DefaultValidationOptions`` inopérante.
+
+        Agrandir suppose une ouverture en écriture : en lecture seule, le refus
+        intervient avant toute question de taille, pour que le motif reste
+        « lecture seule » et non « hors du fichier ». C'est le même correctif
+        que le client doit apporter, pas un autre.
         """
         with self._lock:
             entry = self._get(handle)
@@ -341,10 +371,16 @@ class CertificateGroup:
                 raise TrustListError("ouverture en lecture seule")
             end = entry.position + len(data)
             if end > entry.size():
-                raise TrustListError(
-                    f"écriture hors du fichier ({end} > {entry.size()})"
+                # Agrandissement : le tampon est étendu. Les listes
+                # sous-jacentes ne sont reconstruites qu'à la fermeture, donc
+                # un contenu intermédiaire incomplet n'est jamais observé.
+                entry.buffer = entry.buffer[: entry.position] + bytes(data)
+            else:
+                entry.buffer = (
+                    entry.buffer[: entry.position]
+                    + bytes(data)
+                    + entry.buffer[end:]
                 )
-            entry.buffer = entry.buffer[: entry.position] + bytes(data) + entry.buffer[end :]
             entry.position = end
             entry.dirty = True
             return len(data)

@@ -267,6 +267,29 @@ plutôt que recopiées ; la sévérité est bien 300, celle d'un audit.
 > absent de la table des ExtensionObject : le passer en argument casse la
 > sérialisation sur `KeyError`. Un client normatif n'a jamais ce second cas.
 
+### `selftest_revocation.py` — révocation du GDS (Part 12 §7.8.2.10)
+
+Vérifie le comportement de `DefaultValidationOptions`, qui est **fermé par
+défaut** : sans CRL connue d'un émetteur de confiance, un certificat est
+refusé, son état de révocation étant inconnu.
+
+```bash
+uv run tools/selftest_revocation.py
+```
+
+Vérifié notamment : la propriété est publiée au DataType normatif
+`TrustListValidationOptions` (i=23564) avec la valeur de §7.8.2.10 ; une CRL
+atteint la liste par `Open`/`Write`/`CloseAndUpdate`, le seul chemin que la
+norme offre puisqu'aucun `AddCrl` n'existe ; un certificat listé par la CRL est
+refusé `Bad_CertificateRevoked` ; une CRL émise par **une autre autorité** est
+sans effet, ce qui empêche un déni de service par CRL étrangère ;
+`SuppressRevocationStatusUnknown` et `SuppressCertificateExpired` lèvent le
+refus correspondant.
+
+> L'agencement du fichier par `Write` a été modifié pour cette conséquence. Une
+> écriture bornée à la taille d'origine rendait les listes immuables, donc
+> aucune CRL diffusable, donc la propriété sans effet.
+
 ### `selftest_certmanager.py` — rôle CertificateManager du GDS (Part 12 §7.10)
 
 Interroge l'objet `ServerConfiguration` **par le réseau**. Le test fabrique sa

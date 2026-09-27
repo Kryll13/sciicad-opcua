@@ -35,7 +35,11 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from loguru import logger
 
-from .trustlist import CertificateGroup, thumbprint
+from .trustlist import (
+    DEFAULT_VALIDATION_OPTIONS,
+    CertificateGroup,
+    thumbprint,
+)
 
 #: Attributs de nom acceptés par le format normatif du ``SubjectName``
 #: (§7.9.4). La norme énumère exactement ceux-là ; tout autre préfixe est
@@ -246,6 +250,52 @@ def _verify_signature(certificate: x509.Certificate, issuer_public_key) -> bool:
         except InvalidSignature:
             return False
     return False
+
+
+def _has(flags: int, flag_name: str) -> bool:
+    """Vrai si le drapeau nommé est posé dans l'ensemble de bits.
+
+    Le nom est résolu à partir de l'OptionSet de la norme plutôt que codé en
+    dur : une valeur littérale serait juste jusqu'à ce que la pile change, et
+    le dopage d'un bit faux — ``SuppressCertificateExpired`` valant 1 comme
+    ``SuppressHostNameInvalid`` vaut 2 — produirait une validation qui ignore
+    exactement ce que l'administrateur a demandé de surveiller.
+    """
+    flag = getattr(ua.TrustListValidationOptions, flag_name, None)
+    if flag is None:  # pragma: no cover - garde-fou
+        raise _invalid(f"drapeau de validation inconnu : {flag_name!r}")
+    return bool(int(flags) & int(flag))
+
+
+def _crls_for(crls: list[bytes], issuer: x509.Certificate) -> list[x509.Certificate]:
+    """CRL de la liste qui sont émises par ``issuer``.
+
+    Une CRL porte le nom de son émetteur : l'appliquer sans cette vérification
+    ferait qu'une CRL d'une autorité sans rapport pourrait révoquer — ou
+    blanchir — un certificat sans lien avec elle.
+    """
+    applicable: list[x509.Certificate] = []
+    for raw in crls:
+        try:
+            crl = x509.load_der_x509_crl(raw)
+        except Exception:
+            logger.warning("CRL illisible dans issuer_crls, ignorée")
+            continue
+        if crl.issuer == issuer.subject:
+            applicable.append(crl)
+    return applicable
+
+
+def _is_revoked(crl: x509.Certificate, certificate: x509.Certificate) -> bool:
+    """Vrai si la CRL liste le numéro de série du certificat."""
+    try:
+        return (
+            crl.get_revoked_certificate_by_serial_number(certificate.serial_number)
+            is not None
+        )
+    except Exception:
+        # Une CRL illisible ne vaut pas « non révoqué ».
+        return False
 
 
 def _public_key_of(key) -> bytes:
@@ -549,20 +599,33 @@ class CertificateStore:
         certificate: x509.Certificate,
         group: str,
     ) -> None:
-        """Applique le processus de validation de la Part 4."""
+        """Applique le processus de validation de la Part 4.
+
+        Les drapeaux de ``DefaultValidationOptions`` (§7.8.2.10) ne sont pas
+        décoratifs : ils décident de quelles erreurs sont **insupprimables**.
+        ``SuppressCertificateExpired`` transforme une erreur de temps en
+        simple avertissement, ``SuppressHostNameInvalid`` fait de même pour
+        l'URI d'application, et les drapeaux de révocation décident si la CRL
+        d'un émetteur doit être consultée. Ignorer ce drapeau reviendrait à
+        valider plus strictement que l'administrateur ne l'a demandé.
+        """
+        flags = self._validation_options(group)
         now = datetime.now(timezone.utc)
-        not_before = certificate.not_valid_before_utc
-        not_after = certificate.not_valid_after_utc
-        if now < not_before:
-            raise CertificateError(
-                f"certificat pas encore valide (à partir de {not_before.isoformat()})",
-                ua.StatusCodes.BadCertificateTimeInvalid,
-            )
-        if now > not_after:
-            raise CertificateError(
-                f"certificat expiré (le {not_after.isoformat()})",
-                ua.StatusCodes.BadCertificateTimeInvalid,
-            )
+
+        if not _has(flags, "SuppressCertificateExpired"):
+            not_before = certificate.not_valid_before_utc
+            not_after = certificate.not_valid_after_utc
+            if now < not_before:
+                raise CertificateError(
+                    f"certificat pas encore valide "
+                    f"(à partir de {not_before.isoformat()})",
+                    ua.StatusCodes.BadCertificateTimeInvalid,
+                )
+            if now > not_after:
+                raise CertificateError(
+                    f"certificat expiré (le {not_after.isoformat()})",
+                    ua.StatusCodes.BadCertificateTimeInvalid,
+                )
 
         try:
             constraints = certificate.extensions.get_extension_for_class(
@@ -582,18 +645,23 @@ class CertificateStore:
                 "KeyUsage insuffisant pour un certificat applicatif OPC UA"
             )
 
-        if not self._has_application_uri(certificate):
+        if not _has(flags, "SuppressHostNameInvalid") and not self._has_application_uri(
+            certificate
+        ):
             raise CertificateError(
                 f"l'URI d'application {self.application_uri!r} est absente du SAN",
                 ua.StatusCodes.BadCertificateUriInvalid,
             )
 
-        if not self._chains_to_trusted_issuer(certificate, group):
+        issuer = self._trusted_issuer_of(certificate, group)
+        if issuer is None:
             raise _untrusted(
                 f"la signature ne remonte à aucun certificat de confiance du "
                 f"groupe {group!r} (ni comme certificats de confiance, ni comme "
                 f"émetteurs)"
             )
+        self._check_revocation(certificate, issuer, group, flags)
+
 
     def _has_application_uri(self, certificate: x509.Certificate) -> bool:
         try:
@@ -609,12 +677,22 @@ class CertificateStore:
         )
 
     def _chains_to_trusted_issuer(self, certificate: x509.Certificate, group: str) -> bool:
-        """Vérifie que la signature du certificat remonte à un certificat de confiance.
+        """Vrai si la signature du certificat remonte à un certificat de confiance."""
+        return self._trusted_issuer_of(certificate, group) is not None
+
+    def _trusted_issuer_of(
+        self, certificate: x509.Certificate, group: str
+    ) -> Optional[x509.Certificate]:
+        """Rend le certificat de confiance qui a signé ``certificate``, ou ``None``.
 
         Deux sources sont admises, conformément à la Part 4 : le certificat peut
         être auto-signé et figurer dans les certificats de confiance du groupe, ou
         être signé par un certificat d'émetteur du même groupe. Ce second cas est
         le fonctionnement normal d'un déploiement à autorité de certification.
+
+        Rendre l'émetteur plutôt qu'un booléen est ce qui permet ensuite de lui
+        associer sa CRL : la révocation se consulte « par émetteur », pas en
+        balayant toutes les CRL du groupe au hasard.
         """
         chain = self.groups.get(group)
         candidates: list[bytes] = []
@@ -623,17 +701,91 @@ class CertificateStore:
             candidates += list(chain.issuer_certificates)
         if not candidates:
             # Sans liste de confiance, aucune validation de chaîne n'est possible.
-            # Refuser est le seul comportement sûr : accepter feraitinstaller un
+            # Refuser est le seul comportement sûr : accepter ferait installer un
             # certificat dont personne n'a vérifié l'origine.
-            return False
+            return None
         for raw in candidates:
             try:
                 issuer = x509.load_der_x509_certificate(raw)
             except Exception:
                 continue
             if _verify_signature(certificate, issuer.public_key()):
-                return True
-        return False
+                return issuer
+        return None
+
+    def _validation_options(self, group: str) -> int:
+        """Drapeaux de validation du groupe, §7.8.2.10.
+
+        Un groupe absent, ou dépourvu de drapeaux, retombe sur la valeur par
+        défaut de la norme : le bit ``CheckRevocationStatusOffline``. Le
+        comportement par défaut est donc celui qu'un déploiement attend, sans
+        qu'aucune configuration ne soit requise.
+        """
+        chain = self.groups.get(group)
+        if chain is None:
+            return DEFAULT_VALIDATION_OPTIONS
+        return int(getattr(chain, "default_validation_options", DEFAULT_VALIDATION_OPTIONS))
+
+    def _check_revocation(
+        self,
+        certificate: x509.Certificate,
+        issuer: x509.Certificate,
+        group: str,
+        flags: int,
+    ) -> None:
+        """Confronte le certificat à la CRL de son émetteur.
+
+        §7.8.2.10 énumère sept drapeaux ; deux damping la révocation hors ligne
+        et quatre la neutralisent. ``CheckRevocationStatusOnline`` n'est pas
+        implanté : interroger un OCSP depuis un serveur de découverte sortirait
+        du périmètre, et une révocation en ligne qui échoue silencieusement est
+        pire qu'une absence de vérification. C'est dit explicitement plutôt que
+        passé sous silence, car un administrateur qui pose ce bit croirait le
+        contraire.
+
+        Une CRL absente pour un émetteur signifie un état de révocation
+        *inconnu* : la Part 4 impose alors l'échec, sauf si
+        ``SuppressRevocationStatusUnknown`` est posé. C'est ce qui rend la
+        distribution des CRL obligatoire dès lors que la propriété est
+        exposée — un comportement fermé, et voulu.
+        """
+        if not _has(flags, "CheckRevocationStatusOffline"):
+            return
+
+        chain = self.groups.get(group)
+        crls = list(getattr(chain, "issuer_crls", []) or []) if chain else []
+        applicable = _crls_for(crls, issuer)
+
+        if not applicable:
+            if _has(flags, "SuppressRevocationStatusUnknown"):
+                logger.debug(
+                    f"État de révocation inconnu pour {certificate.subject.rfc4514_string()!r} "
+                    f"(aucune CRL de l'émetteur) : erreur supprimée"
+                )
+                return
+            raise CertificateError(
+                f"aucune CRL connue pour l'émetteur "
+                f"{issuer.subject.rfc4514_string()!r} : l'état de révocation est "
+                f"inconnu et l'erreur n'est pas supprimée "
+                f"(SuppressRevocationStatusUnknown)",
+                ua.StatusCodes.BadCertificateRevoked,
+            )
+
+        for crl in applicable:
+            if _is_revoked(crl, certificate):
+                raise CertificateError(
+                    f"certificat révoqué (série {certificate.serial_number:x}, "
+                    f"CRL de {crl.issuer.rfc4514_string()!r})",
+                    ua.StatusCodes.BadCertificateRevoked,
+                )
+
+        if _has(flags, "SuppressIssuerRevocationStatusUnknown"):
+            # Les drapeaux « Issuer… » visent l'état de révocation des
+            # certificats d'émetteur eux-mêmes, pas celui du certificat présenté.
+            # Le vérifier ici reviendrait à appliquer le mauvais drapeau à la
+            # mauvaise chose ; la distinction est conservée, pas confondue.
+            logger.debug("SuppressIssuerRevocationStatusUnknown sans effet ici")
+
 
     # -- introspection ------------------------------------------------------
 

@@ -68,6 +68,39 @@ VALIDITY_DAYS = 30
 # -- autorité de certification de test -------------------------------------
 
 
+def make_crl(
+    ca_key,
+    ca_certificate: x509.Certificate,
+    revoked_serials: tuple[int, ...] = (),
+) -> bytes:
+    """Fabrique une CRL DER émise par l'autorité donnée.
+
+    Elle est nécessaire dès qu'un certificat est présenté : avec la valeur par
+    défaut de ``DefaultValidationOptions`` (§7.8.2.10, le seul bit
+    ``CheckRevocationStatusOffline``), l'absence de CRL place le certificat dans
+    un état de révocation *inconnu*, que la norme fait échouer. Une CRL vide
+    signifie « rien n'est révoqué » et suffit au cas nominal — c'est un contenu
+    valide, distinct de « aucune CRL connue », qui ne dit rien du tout.
+    """
+    now = datetime.now(timezone.utc)
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(ca_certificate.subject)
+        .last_update(now - timedelta(minutes=5))
+        .next_update(now + timedelta(days=30))
+    )
+    for serial in revoked_serials:
+        builder = builder.add_revoked_certificate(
+            x509.RevokedCertificateBuilder()
+            .serial_number(serial)
+            .revocation_date(now - timedelta(minutes=1))
+            .build()
+        )
+    return builder.sign(ca_key, hashes.SHA256()).public_bytes(
+        serialization.Encoding.DER
+    )
+
+
 def make_ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     """Fabrique une autorité de certification auto-signée, pour le test.
 
@@ -268,6 +301,15 @@ async def run(
         "l'autorité de certification est dans la liste d'émetteurs",
         ca_der in group.issuer_certificates,
         f"{len(group.issuer_certificates)} émetteur(s)",
+    )
+    # La CRL est ce qui rend l'état de révocation connu. Son absence ferait
+    # échouer toute présentation, par défaut de §7.8.2.10 : ce n'est pas une
+    # précaution du test, c'est le comportement normatif.
+    group.issuer_crls.append(make_crl(ca_key, ca_certificate))
+    report.check(
+        "une CRL est diffusée pour l'autorité de test",
+        len(group.issuer_crls) == 1,
+        f"{len(group.issuer_crls[0])} octets",
     )
 
     # -- l'objet est-il au bon endroit ? ------------------------------------

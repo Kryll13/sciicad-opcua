@@ -69,6 +69,14 @@ SERVER_CONFIGURATION_NAME = "ServerConfiguration"
 INSTANCE_BASE = 3_000_000
 INSTANCE_SPAN = 900_000
 
+#: Plage privée des instances de propriétés optionnelles, distincte de celle
+#: des groupes. i=23563 est déjà pris : c'est la déclaration de la propriété sur
+#: le ``TrustListType`` lui-même, qu'asyncua publie sans l'instancier — elle
+#: étant optionnelle. Confondre les deux fait rejeter le ``AddNodes`` pour
+#: « NodeId already exists », sans que le motif ne dise rien du-type.
+INSTANCE_OPTION_BASE = 3_950_000
+INSTANCE_OPTION_SPAN = 50_000
+
 #: Types de certificats admis par groupe, exigés par §7.8.3.1 : la propriété
 #: ``CertificateTypes`` est *Mandatory* et « shall specify one or more subtypes
 #: of ``ApplicationCertificateType`` » pour le groupe d'application.
@@ -102,6 +110,12 @@ _PROPERTIES: dict[str, tuple[str, ua.VariantType]] = {
     "UserWritable": ("user_writable", ua.VariantType.Boolean),
     "OpenCount": ("open_count", ua.VariantType.UInt16),
     "LastUpdateTime": ("last_update_time", ua.VariantType.DateTime),
+    #: ``TrustListValidationOptions`` est un OptionSet, donc un ``UInt32``
+    #: sémantisé — pas un ``Enum``, qui n'accepterait qu'une seule valeur.
+    "DefaultValidationOptions": (
+        "default_validation_options",
+        ua.VariantType.UInt32,
+    ),
 }
 
 
@@ -341,7 +355,70 @@ class CertificateGroupNode:
                 )
                 continue
             self._property_nodes[name] = node
+        await self._declare_validation_options()
         await self._publish(force=True)
+
+    async def _declare_validation_options(self) -> None:
+        """Crée et renseigne ``DefaultValidationOptions`` (§7.8.2.1).
+
+        La propriété est **optionnelle** au sens de Table 27, donc absente de
+        l'instance construite par asyncua. Elle est pourtant le seul endroit où
+        la norme dit quelles options appliquer « when validating Certificates
+        with the TrustList » : sans elle, aucune validation n'est paramétrable,
+        et la révocation reste hors d'atteinte.
+
+        La créer est donc conforme, et nécessaire. Le type est
+        ``TrustListValidationOptions`` (i=23564, publié par la Fondation OPC),
+        et la valeur initiale est celle de §7.8.2.10 : le seul bit
+        ``CheckRevocationStatusOffline``.
+
+        La propriété reste exposed en écriture — §7.8.2.1 dit qu'un client ayant
+        le rôle ``SecurityAdmin`` « may update » la valeur. Le modèle de rôles
+        n'étant pas implanté, elle est modifiable par quiconque écrit dans la
+        liste ; c'est documenté, et non dissimulé.
+
+        Une limite honnête : asyncua ne sait pas porter la définition d'un
+        OptionSet (son ``DataTypeDefinition`` est un dataclass vide), donc les
+        noms de bits ne sont pas portés par la propriété elle-même. Le DataType
+        ``TrustListValidationOptions`` et ses ``OptionSetValues`` existent en
+        revanche dans l'espace d'adressage (i=23564 et 23565), ce qui permet à
+        un client qui parcourt le modèle de les retrouver.
+        """
+        node = await _child_by_name(self.trust_list, "DefaultValidationOptions")
+        if node is None:
+            try:
+                node = await self.trust_list.add_property(
+                    ua.NodeId(self._option_instance_nodeid(), 0),
+                    ua.QualifiedName("DefaultValidationOptions", 0),
+                    int(self.group.default_validation_options),
+                    ua.VariantType.UInt32,
+                    ua.NodeId(ua.ObjectIds.TrustListValidationOptions),  # 23564
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"DefaultValidationOptions non créée : "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return
+            logger.info(
+                f"  DefaultValidationOptions créée pour « {self.group.name} » "
+                f"en i={node.nodeid.Identifier} "
+                f"(DataType TrustListValidationOptions i="
+                f"{ua.ObjectIds.TrustListValidationOptions}, "
+                f"valeur {int(self.group.default_validation_options)})"
+            )
+        self._property_nodes["DefaultValidationOptions"] = node
+
+    def _option_instance_nodeid(self) -> int:
+        """NodeId d'instance d'une propriété optionnelle, dans la plage privée.
+
+        Distinct de :meth:`_instance_nodeid`, qui alloue les groupes : les deux
+        familles doivent rester séparées, sinon un nom de groupe pourrait
+        tomber sur le NodeId d'une propriété.
+        """
+        return INSTANCE_OPTION_BASE + (
+            hash(self.group.name) % INSTANCE_OPTION_SPAN
+        )
 
     async def _publish(self, force: bool = False) -> None:
         """Recopie l'état de la liste dans les propriétés de l'espace d'adressage.

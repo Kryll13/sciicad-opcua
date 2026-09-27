@@ -50,6 +50,33 @@ TRUST_LIST_UPDATED = ua.ObjectIds.TrustListUpdatedAuditEventType    # 12561
 CERTIFICATE_UPDATED = ua.ObjectIds.CertificateUpdatedAuditEventType  # 12620
 
 
+def make_crl(
+    ca_key, ca_certificate: x509.Certificate, revoked_serials: tuple = ()
+) -> bytes:
+    """CRL DER émise par l'autorité donnée.
+
+    Indispensable : sans elle, l'état de révocation du certificat est inconnu et
+    la validation échoue, par défaut fermé de §7.8.2.10.
+    """
+    now = datetime.now(timezone.utc)
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(ca_certificate.subject)
+        .last_update(now - timedelta(minutes=5))
+        .next_update(now + timedelta(days=30))
+    )
+    for serial in revoked_serials:
+        builder = builder.add_revoked_certificate(
+            x509.RevokedCertificateBuilder()
+            .serial_number(serial)
+            .revocation_date(now - timedelta(minutes=1))
+            .build()
+        )
+    return builder.sign(ca_key, hashes.SHA256()).public_bytes(
+        serialization.Encoding.DER
+    )
+
+
 def make_ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     """Autorité de certification de test, extérieure au GDS."""
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -281,6 +308,9 @@ async def run(report: Report, url: str, group_node, manager_node, store, group, 
 
         # -- UpdateCertificate refusé, puis accepté ---------------------------
         group.add(ca_der, is_trusted=False)
+        # Sans CRL, l'état de révocation serait inconnu et toute présentation
+        # échouerait : défaut fermé de §7.8.2.10, non une précaution du test.
+        group.issuer_crls.append(make_crl(ca_key, ca_certificate))
         null_id = ua.NodeId(0, 0)
         empty = ua.Variant([], ua.VariantType.ByteString)
 
