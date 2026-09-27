@@ -150,6 +150,25 @@ par la pile.
 | `AddCertificate`         | ajoute un certificat DER, par empreinte                 |
 | `RemoveCertificate`      | retire par empreinte SHA-1                               |
 
+Cinq propriétés sont **obligatoires** : `Size`, `Writable`, `UserWritable` et
+`OpenCount` viennent de `FileType` (Part 20), `LastUpdateTime` est ajoutée par
+§7.8.3.1. Elles reflètent l'état réel et sont republiées après chaque méthode
+servie — une poignée n'existant que si un `Open` est passé par ce nœud, la
+valeur est donc exacte sans tâche de fond.
+
+| Propriété        | Valeur                                    |
+|------------------|-------------------------------------------|
+| `Size`           | `Bad_NotSupported` — §7.8.2.1 renvoie à la Part 20, qui l'impose quand la taille n'a pas de sens. Un `0` ou un `None` mentirait sur un contenu qui, lui, se lit très bien. |
+| `Writable`       | `True`                                    |
+| `UserWritable`   | `True` — ne peut pas être plus restrictif tant que le §7.2 n'est pas implanté (voir plus bas) |
+| `OpenCount`      | nombre de poignées valides                |
+| `LastUpdateTime` | `DateTime.MinValue` tant que la liste n'a pas bougé — §7.8.3.1 l'exige après un redémarrage, cette liste vivant en mémoire et repartant vide |
+
+`UpdateFrequency`, `ActivityTimeout` et `DefaultValidationOptions` sont
+optionnelles et ne sont pas publiées. `DefaultValidationOptions` est pourtant la
+pièce qui manque le plus : ses sept bits (`SuppressCertificateExpired`,
+`CheckRevocationStatusOnline`…) sont le levier prévu pour la révocation.
+
 Deux règles de sûreté, vérifiées par `tools/selftest_trustlist.py` :
 
 - `Open` en lecture seule refuse `Write` avec `BadNotWritable`, et
@@ -251,6 +270,30 @@ qui est implémenté.
 
 Reste donc à faire, si le besoin se présente : la distribution des CRL, et le
 modèle transactionnel du §7.10 (`ApplyChanges`, `ResetToServerDefaults`).
+
+Le §7.10 est lui-même **partiellement inimplementable** :
+`CreateSelfSignedCertificate` (§7.10.6) et `DeleteCertificate` (§7.10.7) sont
+absents du `NodeIds.csv` officiel aussi bien que d'asyncua — même cas que le
+§7.9, pour la même raison. Sept des onze méthodes de `ServerConfigurationType`
+sont donc atteignables ; quatre restent hors de portée normative.
+
+### Contrôle d'accès — non implanté, et ce n'est pas une référence manquante
+
+Le §7.2 exige qu'une écriture exige un rôle — `CertificateAuthorityAdmin`,
+`RegistrationAuthorityAdmin`, `SecurityAdmin` — et §7.10.5 comme §7.8.3.2
+répètent que ces méthodes « shall be called from an encrypted SecureChannel and
+from a Client that has access to the SecurityAdmin Role ». **Rien de tout cela
+n'est en place** : le GDS tourne en `NoSecurity` et n'a aucun modèle de rôles.
+
+Ce n'est pas une information à aller chercher. Les Tables 18, 19 et 20 du §7.2
+définissent ces rôles **en prose**, sans NodeId, et `SecurityAdmin` est absent du
+`NodeIds.csv` : le modèle de rôles est celui de la Part 5, où chaque
+application définit les siens — le nœud `RoleType` n'a pour enfants que
+`ApplicationsExclude` et `EndpointsExclude`. Décider quels rôles ce GDS offre,
+et les faire vérifier, est un choix de déploiement.
+
+Tant que ce n'est pas fait, `UserWritable` vaut ce que vaut `Writable` :
+l'annoncer `False` serait faux.
 
 ## thermo-plc — PLC Thermostat (`thermo-plc/`)
 

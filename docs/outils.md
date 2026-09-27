@@ -226,6 +226,22 @@ bloc, un `Open` en lecture seule refuse `Write` avec `BadNotWritable`,
 `OpenWithMasks` ne livre que les listes demandées, et un `FileHandle` inconnu
 donne `BadInvalidArgument`.
 
+Les **cinq propriétés obligatoires** de l'objet `TrustList` y sont lues par le
+réseau : `Size` doit renvoyer `BadNotSupported`, `OpenCount` doit suivre les
+poignées *dans l'espace d'adressage* et pas seulement dans le modèle Python, et
+`LastUpdateTime` doit être postérieur à `DateTime.MinValue` après modification.
+Le test laisse volontairement une ouverture non refermée pour observer
+`OpenCount` — c'est le cas que la norme veut rendre visible — puis la referme et
+vérifie la descente à zéro. Un contrôle vérifie aussi qu'un refus ne publie
+rien de faux.
+
+> Ces contrôles ont été ajoutés après avoir constaté que le modèle Python était
+> juste tandis que l'espace d'adressage renvoyait `None` : un test qui lit
+> `group.open_count()` passe au vert sans qu'aucun client ne voie quoi que ce
+> soit. Même angle mort que pour le doublon `ServerConfiguration` — le test
+> vérifiait l'objet, pas le chemin d'accès. Validé en désactivant la
+> republication : quatre contrôles échouent, dont `nœud=0, modèle=1`.
+
 ### `selftest_certmanager.py` — rôle CertificateManager du GDS (Part 12 §7.10)
 
 Interroge l'objet `ServerConfiguration` **par le réseau**. Le test fabrique sa

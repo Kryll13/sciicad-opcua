@@ -74,6 +74,14 @@ MODE_WRITE = ua.OpenFileMode.Write
 #: dépassant les limites de transport d'asyncua (65535 octets utiles).
 MAX_READ_CHUNK = 8192
 
+#: Valeur initiale de ``LastUpdateTime`` exigée par §7.8.3.1 : « If a Server is
+#: not able to determine the LastUpdateTime after an event such as a restart,
+#: then the LastUpdateTime shall be DateTime.MinValue. » Cette liste vit en
+#: mémoire et repart vide à chaque démarrage : son âge réel est inconnu, et
+#: dater la liste de l'instant du démarrage affirmerait une mise à jour qui
+#: n'a pas eu lieu.
+DATE_MIN = datetime(1601, 1, 1, tzinfo=timezone.utc)
+
 
 class TrustListError(ua.UaError):
     """Erreur fonctionnelle de la liste de confiance."""
@@ -150,7 +158,7 @@ class CertificateGroup:
     trusted_crls: list[bytes] = field(default_factory=list)
     issuer_certificates: list[bytes] = field(default_factory=list)
     issuer_crls: list[bytes] = field(default_factory=list)
-    last_update_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_update_time: datetime = field(default_factory=lambda: DATE_MIN)
 
     # Verrou : les méthodes d'une liste de confiance sont appelables depuis
     # plusieurs sessions à la fois, et le modèle fichier expose une position
@@ -160,6 +168,33 @@ class CertificateGroup:
     _next_handle: int = field(default=1, repr=False)
 
     # -- état -------------------------------------------------------------
+
+    def state(self) -> dict:
+        """Propriétés de l'objet ``TrustList`` telles que la norme les définit.
+
+        Une liste de confiance est un ``FileType`` (Part 20, Table *FileType*)
+        auquel la Part 12 §7.8.3.1 ajoute ``LastUpdateTime``. Les cinq
+        propriétés obligatoires sont ici, et nulle part ailleurs : c'est le
+        seul endroit où l'on sait ce qu'elles valent.
+
+        * ``size`` n'a pas de sens pour une liste de confiance — §7.8.2.1 le dit
+          et renvoie à la Part 20, qui impose alors ``Bad_NotSupported``. La
+          valeur n'est donc pas un nombre, et le câblage s'en charge ;
+        * ``writable`` et ``user_writable`` valent ``True`` : la liste s'écrit
+          par ``CloseAndUpdate`` et ``AddCertificate``. Elles ne peuvent pas
+          être plus restrictives tant que le modèle de rôles du §7.2 n'est pas
+          implanté — voir la note de ``_publish_properties``.
+        * ``open_count`` est le nombre de poignées valides, que la Part 20
+          définit comme « the number of currently valid file handles ».
+        """
+        with self._lock:
+            return {
+                "size": None,  # Bad_NotSupported, cf. §7.8.2.1
+                "writable": True,
+                "user_writable": True,
+                "open_count": len(self._handles),
+                "last_update_time": self.last_update_time,
+            }
 
     def lists(self, masks: int = ua.TrustListMasks.All) -> dict[str, list[bytes]]:
         """Retourne les listes couvertes par ``masks``."""

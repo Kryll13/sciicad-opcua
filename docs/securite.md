@@ -88,6 +88,15 @@ Voir [`serveurs.md`](serveurs.md#role-certificatemanager-part-12-710).
 > signer lui-même. C'est ce que prescrit §7.10.5, qui décrit le certificat reçu
 > comme signé et non produit par le serveur.
 
+> **Le contrôle d'accès du §7.2 n'est pas implanté.** Les Tables 18 à 20
+> définissent en prose les rôles `CertificateAuthorityAdmin`,
+> `RegistrationAuthorityAdmin` et `SecurityAdmin`, sans NodeId : le modèle de
+> rôles est celui de la Part 5, où chaque application définit les siens. Ce
+> n'est donc pas une référence manquante mais un choix de déploiement. Tant
+> qu'il n'est pas fait, toute session — y compris anonyme — peut écrire dans
+> les listes de confiance et appeler `UpdateCertificate`. Voir
+> [`serveurs.md`](serveurs.md#controle-dacces-non-implante-et-ce-nest-pas-une-reference-manquante).
+
 La validation d'un certificat entrant applique le processus de la Part 4 et
 n'accepte que si la chaîne de signature remonte à un certificat de confiance du
 groupe — la liste `issuer_certificates` doit donc contenir l'autorité de

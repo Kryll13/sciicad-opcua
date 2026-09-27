@@ -87,6 +87,19 @@ CERTIFICATE_TYPES: dict[str, tuple[int, ...]] = {
     "DefaultUserTokenGroup": (19323,),  # UserCertificateType
 }
 
+#: Propriétés obligatoires de l'objet ``TrustList`` : nom du nœud, champ
+#: correspondant dans :meth:`gds.trustlist.CertificateGroup.state`, et type de
+#: variante. Les DataTypes sont ceux de la Part 20 et de la Part 12 :
+#: ``OpenCount`` est un ``UInt16``, ``LastUpdateTime`` un ``UtcTime``,
+#: ``Size`` un ``UInt64`` — ce dernier n'y figure pas, sa valeur étant un statut
+#: d'erreur, écrit une fois pour toutes par ``_declare_file_properties``.
+_PROPERTIES: dict[str, tuple[str, ua.VariantType]] = {
+    "Writable": ("writable", ua.VariantType.Boolean),
+    "UserWritable": ("user_writable", ua.VariantType.Boolean),
+    "OpenCount": ("open_count", ua.VariantType.UInt16),
+    "LastUpdateTime": ("last_update_time", ua.VariantType.DateTime),
+}
+
 
 async def certificate_group_folder(server):
     """Retourne le dossier ``CertificateGroups``, en le créant s'il manque.
@@ -132,6 +145,10 @@ class CertificateGroupNode:
         self.group = group if group is not None else CertificateGroup()
         self.node = None
         self.trust_list = None
+        #: Nœuds des propriétés obligatoires de la ``TrustList``.
+        self._property_nodes: dict = {}
+        #: Dernière valeur écrite, pour n'écrire que ce qui change.
+        self._published: dict = {}
 
     async def build(self, parent=None) -> None:
         """Rattache le groupe à son instance normative et branche les méthodes.
@@ -207,12 +224,14 @@ class CertificateGroupNode:
         )
 
     async def _bind_trust_list(self) -> None:
-        """Instancie la ``TrustList`` et branche ses dix méthodes."""
+        """Instancie la ``TrustList`` et branche méthodes et propriétés."""
         self.trust_list = await _child_by_name(self.node, "TrustList")
         if self.trust_list is None:
             raise TrustListError(
                 "l'instance de CertificateGroupType n'expose pas d'objet TrustList"
             )
+
+        await self._declare_file_properties()
 
         handle = self._arg("FileHandle", ua.ObjectIds.UInt32)
 
@@ -266,6 +285,78 @@ class CertificateGroupNode:
                 self._arg("IsTrustedCertificate", ua.ObjectIds.Boolean),
             ],
         )
+
+    async def _declare_file_properties(self) -> None:
+        """Renseigne les propriétés obligatoires de l'objet ``TrustList``.
+
+        Cinq le sont, et aucune n'était écrite : un client qui lisait
+        ``OpenCount`` obtenait ``None``, donc ne pouvait pas voir une ouverture
+        abandonnée — exactement ce que la Part 20 expose cette propriété pour
+        rendre visible. Le modèle Python était juste ; l'espace d'adressage, non.
+
+        ``Size`` est le cas particulier. §7.8.2.1 : « The ``Size`` Property
+        inherited from ``FileType`` has no meaning for TrustList and returns the
+        error code defined in OPC 10000-20 », et la Part 20 tranche : « If the
+        Server can not accurately determine the size of the file, the ``Size``
+        Property shall be returned to a Client with a StatusCode of
+        ``Bad_NotSupported`` ». La valeur est donc un statut d'erreur, pas un
+        nombre — l'écrire à ``0`` ou à ``None`` mentirait sur la taille d'un
+        contenu qui, lui, se lit très bien.
+        """
+        size = await _child_by_name(self.trust_list, "Size")
+        if size is not None:
+            # ua.DataValue est un dataclass figé : la valeur est remplacée, pas
+            # modifiée sur place.
+            current = await size.read_data_value()
+            await size.write_attribute(
+                ua.AttributeIds.Value,
+                ua.DataValue(
+                    Value=ua.Variant(None, current.Value.VariantType),
+                    # Le champ s'appelle StatusCode_ : « StatusCode » est
+                    # utilisé par asyncua pour l'attribut de même nom de la
+                    # DataValue, et le constructeur a dû le renommer.
+                    StatusCode_=ua.StatusCode(ua.StatusCodes.BadNotSupported),
+                    SourceTimestamp=current.SourceTimestamp,
+                    ServerTimestamp=current.ServerTimestamp,
+                ),
+            )
+            logger.debug("  Size = BadNotSupported (§7.8.2.1)")
+
+        state = self.group.state()
+        for name in ("Writable", "UserWritable", "OpenCount", "LastUpdateTime"):
+            node = await _child_by_name(self.trust_list, name)
+            if node is None:
+                logger.warning(
+                    f"propriété {name} absente de l'instance TrustList, "
+                    f"elle n'est pas créée"
+                )
+                continue
+            self._property_nodes[name] = node
+        await self._publish(force=True)
+
+    async def _publish(self, force: bool = False) -> None:
+        """Recopie l'état de la liste dans les propriétés de l'espace d'adressage.
+
+        Appelé après chaque méthode servie. C'est suffisant pour que les
+        propriétés soient exactes : une poignée n'existe que si un ``Open`` est
+        passé par ce nœud, et cet appel met la propriété à jour. Aucune tâche de
+        fond n'est nécessaire, et une rafraîchirait des valeurs déjà justes.
+
+        Une note honnête sur ``UserWritable`` : la Part 20 veut qu'elle tienne
+        compte des droits d'accès de l'utilisateur, et la Part 12 §7.2 exige
+        qu'une écriture exige le rôle ``SecurityAdmin``. Le modèle de rôles n'est
+        pas implanté — les rôles y sont définis en prose, sans NodeId, le modèle
+        de la Part 5 étant propre à chaque application. La propriété vaut donc ce
+        que vaut ``Writable``, et annoncer ``False`` serait faux.
+        """
+        state = self.group.state()
+        for name, node in self._property_nodes.items():
+            value = state[_PROPERTIES[name][0]]
+            if not force and self._published.get(name) == value:
+                continue
+            _, variant_type = _PROPERTIES[name]
+            await node.write_value(ua.Variant(value, variant_type))
+            self._published[name] = value
 
     # -- utilitaires -------------------------------------------------------
 
@@ -322,7 +413,7 @@ class CertificateGroupNode:
 
         async def call(_parent, *inputs):
             try:
-                return await handler(*(_plain(v) for v in inputs))
+                result = await handler(*(_plain(v) for v in inputs))
             except TrustListError as exc:
                 # Le code est *retourné*, pas levé : asyncua enveloppe toute
                 # exception en BadUnexpectedError (address_space.py, _call),
@@ -334,6 +425,15 @@ class CertificateGroupNode:
             except Exception:  # pragma: no cover - garde-fou
                 logger.exception(f"{name} : erreur inattendue")
                 return ua.StatusCode(ua.StatusCodes.BadInternalError)
+            # Les propriétés obligatoires de l'objet TrustList sont republiées
+            # ici, et non dans chaque gestionnaire : Open et Close modifient
+            # OpenCount, CloseAndUpdate et AddCertificate modifient
+            # LastUpdateTime — et il n'existe aucun autre chemin vers l'un ou
+            # l'autre. Un refus, à l'inverse, ne change rien, donc ne publie
+            # rien. Ainsi, un client qui relit une propriété juste après un
+            # appel réussi la trouve juste, sans tâche de fond.
+            await self._publish()
+            return result
 
         await parent.add_method(
             nodeid, ua.QualifiedName(name, 0), call, in_args, out_args or [], None

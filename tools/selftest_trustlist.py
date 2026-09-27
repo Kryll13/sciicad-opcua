@@ -87,6 +87,21 @@ class TrustListClient:
     def has(self, name: str) -> bool:
         return name in self._methods
 
+    async def property_status(self, name: str) -> ua.StatusCode:
+        """Statut de lecture d'une propriété, sans lever.
+
+        ``Size`` doit renvoyer ``Bad_NotSupported`` : le lire par ``read_value``
+        ferait lever, ce qui empêcherait de vérifier que c'est bien *ce* code
+        qui est rendu et non une erreur de transport.
+        """
+        result = await self._methods[name].read_attribute(
+            ua.AttributeIds.Value, None, raise_on_bad_status=False
+        )
+        return result.StatusCode
+
+    async def property_value(self, name: str) -> Any:
+        return await self._methods[name].read_value()
+
     async def call(self, name: str, *args: Any) -> Any:
         """Appelle une méthode, en renvoyant la première valeur de sortie.
 
@@ -136,6 +151,48 @@ async def run(report: Report, client: TrustListClient, group: CertificateGroup) 
     if missing:
         return
 
+    # -- propriétés obligatoires de l'objet TrustList ------------------------
+    # Une liste de confiance est un FileType (Part 20) auquel §7.8.3.1 ajoute
+    # LastUpdateTime. Cinq propriétés sont obligatoires, et le modèle Python
+    # était juste tandis que l'espace d'adressage ne l'était pas : elles
+    # renvoyaient toutes None. Un client ne pouvait donc pas voir une
+    # ouverture abandonnée, ce que OpenCount existe précisément pour montrer.
+    for name in ("Size", "Writable", "UserWritable", "OpenCount", "LastUpdateTime"):
+        report.check(
+            f"la propriété {name} est publiée",
+            client.has(name),
+            "i=?" if not client.has(name) else "présente",
+        )
+
+    report.check(
+        "Size renvoie BadNotSupported (§7.8.2.1 puis Part 20)",
+        (await client.property_status("Size")).name == "BadNotSupported",
+        (await client.property_status("Size")).name,
+    )
+    report.check(
+        "la liste est annoncée inscriptible",
+        await client.property_value("Writable") is True
+        and await client.property_value("UserWritable") is True,
+        f"Writable={await client.property_value('Writable')}, "
+        f"UserWritable={await client.property_value('UserWritable')}",
+    )
+    report.check(
+        "OpenCount démarre à zéro",
+        await client.property_value("OpenCount") == 0,
+        f"{await client.property_value('OpenCount')}",
+    )
+
+    # Ouverture volontaire jamais refermée : c'est le cas que la norme veut
+    # rendre visible, et la seule façon de le prouver est d'en laisser une.
+    leaking = await client.call("Open", ua.OpenFileMode.Read)
+    report.check(
+        "OpenCount s'incrémente à la lecture, pas seulement en mémoire",
+        await client.property_value("OpenCount") == 1
+        and group.open_count() == 1,
+        f"nœud={await client.property_value('OpenCount')}, "
+        f"modèle={group.open_count()}",
+    )
+
     # -- AddCertificate / RemoveCertificate ----------------------------------
     await client.call("AddCertificate", DER_A, True)
     report.check("AddCertificate ajoute le certificat", group.contains(DER_A), f"{group.count()} élément(s)")
@@ -152,9 +209,19 @@ async def run(report: Report, client: TrustListClient, group: CertificateGroup) 
     )
 
     # -- Open / Read ---------------------------------------------------------
+    before = group.open_count()
     handle = await client.call("Open", ua.OpenFileMode.Read)
     report.check("Open retourne un FileHandle", isinstance(handle, int) and handle > 0, f"{handle}")
-    report.check("Open incrémente OpenCount", group.open_count() == 1, f"{group.open_count()}")
+    # Le delta plutôt qu'une valeur absolue : une poignée a été laissée ouverte
+    # plus haut, à dessein, pour observer OpenCount. Compter « 1 » supposerait
+    # que le test maîtrise le nombre d'ouvertures, ce qui n'est pas son rôle.
+    report.check(
+        "Open incrémente OpenCount",
+        group.open_count() == before + 1
+        and await client.property_value("OpenCount") == before + 1,
+        f"modèle {before}->{group.open_count()}, "
+        f"nœud {await client.property_value('OpenCount')}",
+    )
 
     expected = group.serialise()
     blob = await client.call("Read", handle, 65535)
@@ -249,7 +316,36 @@ async def run(report: Report, client: TrustListClient, group: CertificateGroup) 
         status = await client.status_of(name, *args)
         report.check(f"{name} sur un FileHandle inconnu donne {expected_status}", status.name == expected_status, status.name)
 
-    report.check("OpenCount est revenu à zéro", group.open_count() == 0, f"{group.open_count()}")
+    # Un refus ne doit rien publier : OpenCount reste à 1, celle de la
+    # poignée laissée ouverte, et ne tombe pas à zéro par accident.
+    report.check(
+        "un refus ne publie pas d'état faux",
+        await client.property_value("OpenCount") == 1,
+        f"OpenCount={await client.property_value('OpenCount')} (1 attendu)",
+    )
+
+    # La poignée laissée ouverte plus haut est enfin refermée : le compteur doit
+    # descendre dans l'espace d'adressage comme dans le modèle.
+    await client.call("Close", leaking)
+    report.check(
+        "OpenCount retombe à zéro une fois refermé",
+        await client.property_value("OpenCount") == 0
+        and group.open_count() == 0,
+        f"nœud={await client.property_value('OpenCount')}, "
+        f"modèle={group.open_count()}",
+    )
+    report.check(
+        "OpenCount est revenu à zéro", group.open_count() == 0, f"{group.open_count()}"
+    )
+
+    # LastUpdateTime : DateTime.MinValue tant que la liste n'a pas bougé
+    # (§7.8.3.1), puis l'instant réel de la dernière modification.
+    stamp = await client.property_value("LastUpdateTime")
+    report.check(
+        "LastUpdateTime est postérieur à DateTime.MinValue après modification",
+        stamp is not None and stamp.year > 1601,
+        str(stamp),
+    )
 
     # -- l'état survit-il à la réouverture --------------------------------------
     # DER_A a été retirée ci-dessus, DER_B est un émetteur : la liste de
