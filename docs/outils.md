@@ -455,6 +455,32 @@ Contrôle négatif du contrôle négatif : neutraliser `_check_application_profi
 fait passer les trois refus à `Good`, et l'auto-test échoue. C'est ce qui
 prouve qu'il exerce réellement le contrôle.
 
+### `selftest_secure_channel.py` — canal sécurisé du LDS et du GDS (phase 2)
+
+```bash
+python tools/selftest_secure_channel.py
+```
+
+Établit de **vrais canaux** contre un vrai GDS, et vérifie quatre verdicts
+distincts :
+
+- client **déclaré** de confiance → accepté ;
+- certificat signé mais **jamais déclaré** → refusé, `BadCertificateUntrusted` ;
+- certificat **révoqué** → refusé, `BadCertificateRevoked` ;
+- `NoSecurity` toujours accepté, sans certificat.
+
+Vérifie aussi que le LDS annonce `Basic256Sha256_SignAndEncrypt` sans valider de
+certificat client — ce n'est pas un oubli, c'est §6.2 qui ne parle d'identité que
+pour les services globaux — et que le mode dégradé (sans certificat) n'annonce
+que `NoSecurity`.
+
+> **Le contrôle le plus important est le contrôle d'absence.** Retirer le
+> validateur doit faire réapparaître l'acceptation du certificat non déclaré.
+> Sans lui, ce test ne prouve pas qu'un refus a lieu : il prouve qu'un refus a
+> lieu, ce qui est compatible avec un refus dû à n'importe quoi d'autre — et le
+> reste du code le démontre, en refusant pour des motifs sans rapport. C'est ce
+> contrôle qui attribue le refus à sa cause.
+
 ### `selftest_revocation.py` — révocation du GDS (Part 12 §7.8.2.10)
 
 Vérifie le comportement de `DefaultValidationOptions`, qui est **fermé par

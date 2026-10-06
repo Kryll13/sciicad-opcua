@@ -776,6 +776,9 @@ class CertificateStore:
         self,
         certificate: x509.Certificate,
         group: str,
+        flags: Optional[int] = None,
+        *,
+        require_application_uri: bool = True,
     ) -> None:
         """Applique le processus de validation de la Part 4.
 
@@ -787,7 +790,7 @@ class CertificateStore:
         d'un émetteur doit être consultée. Ignorer ce drapeau reviendrait à
         valider plus strictement que l'administrateur ne l'a demandé.
         """
-        flags = self._validation_options(group)
+        flags = self._validation_options(group) if flags is None else flags
         now = datetime.now(timezone.utc)
 
         if not _has(flags, "SuppressCertificateExpired"):
@@ -816,8 +819,10 @@ class CertificateStore:
 
         _check_application_profile(certificate)
 
-        if not _has(flags, "SuppressHostNameInvalid") and not self._has_application_uri(
-            certificate
+        if (
+            require_application_uri
+            and not _has(flags, "SuppressHostNameInvalid")
+            and not self._has_application_uri(certificate)
         ):
             raise CertificateError(
                 f"l'URI d'application {self.application_uri!r} est absente du SAN",
@@ -833,6 +838,75 @@ class CertificateStore:
             )
         self._check_revocation(certificate, issuer, group, flags)
 
+
+    def validate_presented(
+        self,
+        group: str,
+        certificate: x509.Certificate,
+        *,
+        require_application_uri: bool = False,
+    ) -> x509.Certificate:
+        """Valide un certificat **présenté sur un canal**, sans l'installer.
+
+        Distinct de :meth:`update_certificate` pour une raison précise : un
+        certificat présenté sur un canal ne doit pas être *installé*. C'est un
+        peer qui s'identifie, pas une demande de déploiement. L'installer
+        modifierait l'état du groupe à chaque ouverture de canal, ce qui
+        enverrait un événement d'audit par connexion et ferait de la liste de
+        confiance un journal des visites.
+
+        Deux différences avec la validation d'installation, et une seule est
+        un choix :
+
+        * **l'URI d'application n'est pas exigée** (``require_application_uri``
+          vaut ``False``). C'est un choix, et il est nécessaire : le contrôle
+          compare le SAN à ``self.application_uri``, qui est l'URI **du
+          serveur**. Un certificat client ne portera jamais ``urn:SCIICAD:gds``,
+          et l'exiger refuserait tous les clients légitimes. Le lien entre le
+          certificat et l'identité déclarée par le client est fait **ailleurs**,
+          par la pile, qui compare le certificat présenté à l'URI annoncée dans
+          l'``ApplicationDescription``. Ce contrôle-là existe déjà et n'est pas
+          du ressort d'ici.
+
+        * **le certificat doit être un certificat connu**, pas seulement
+          conforme. Un profil valide et une chaîne correcte ne suffisent pas :
+          il faut que la clé ait été déclarée de confiance. Sans ce troisième
+          contrôle, n'importe quel certificat produit par l'autorité — y
+          compris un certificat de test淋 émis puis abandonné — serait accepté
+          pour ouvrir un canal.
+
+        Rend le certificat validé, pour que l'appelant puisse journaliser son
+        empreinte.
+        """
+        flags = self._validation_options(group)
+        self._validate(certificate, group, flags,
+                       require_application_uri=require_application_uri)
+
+        chain = self.groups.get(group)
+        known = False
+        if chain is not None:
+            for raw in (*chain.trusted_certificates, *chain.issuer_certificates):
+                try:
+                    if thumbprint(
+                        x509.load_der_x509_certificate(raw).public_bytes(
+                            serialization.Encoding.DER
+                        )
+                    ) == thumbprint(certificate.public_bytes(serialization.Encoding.DER)):
+                        known = True
+                        break
+                except Exception:
+                    continue
+        if not known:
+            raise _untrusted(
+                f"le certificat présenté (empreinte "
+                f"{thumbprint(certificate.public_bytes(serialization.Encoding.DER))}) "
+                f"ne figure ni dans les certificats de confiance ni dans les "
+                f"émetteurs du groupe {group!r}. Il peut être conforme et signé "
+                f"par une autorité de confiance sans avoir été déclaré de "
+                f"confiance : ce sont deux listes distinctes, et c'est la "
+                f"seconde qui fait la confiance."
+            )
+        return certificate
 
     def _has_application_uri(self, certificate: x509.Certificate) -> bool:
         try:

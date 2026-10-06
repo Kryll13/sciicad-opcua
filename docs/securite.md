@@ -143,6 +143,97 @@ Un ancrage visant un groupe non rattaché est signalé et **ignoré, jamais
 redirigé** : placé dans le mauvais groupe, il accepterait des présentations qui
 ne doivent pas l'être.
 
+## Canal sécurisé du LDS et du GDS (phase 2)
+
+### Ce que la norme exige, et que l'ancien code niait
+
+`lds/server.py` affirmait : *« Un serveur de découverte ne doit exposer que
+NoSecurity : la découverte précède l'établissement d'un canal sécurisé. »*
+
+C'est un sophisme. La découverte **anonyme** est bien possible en `NoSecurity` —
+mais elle **n'inscrit rien**. La Part 12 est explicite :
+
+| § | Ce qu'elle dit |
+|---|---|
+| 6.2, Table 2 | « The Certificate used to create the SecureChannel is used to determine the **identity** of the OPC UA Application. » |
+| 6.5.6 | RegisterApplication « shall be called from an **authenticated SecureChannel** », en « MessageSecurityMode **SignAndEncrypt** » |
+
+Un serveur de découverte réduit à `NoSecurity` ne peut donc **pas** satisfaire ce
+rôle : il ne peut ni inscrire, ni valider, ni être validé. La phrase supprimée
+n'était pas une opinion — elle était fausse, et elle expliquait un blocage réel.
+
+Les deux serveurs annoncent désormais `Basic256Sha256_SignAndEncrypt` **à côté**
+de `NoSecurity`. `NoSecurity` reste nécessaire : c'est lui qui permet à un client
+sans certificat d'obtenir les endpoints sécurisés par `GetEndpoints`.
+
+### Le chiffrement ne prouve pas l'identité
+
+Un canal `SignAndEncrypt` prouve qu'un client détient une clé privée. C'est
+vrai, et insuffisant : le chiffrement empêche l'**écoute**, pas l'**usurpation**.
+Un attaquant qui détient son propre couple de clés établit un canal parfaitement
+chiffré vers le GDS.
+
+Ce qui le distingue d'un client légitime : sa clé n'est déclarée dans aucune
+liste de confiance. C'est le rôle du validateur.
+
+| Serveur | Valide le certificat client | Pourquoi |
+|---|---|---|
+| **GDS** | **oui** | §6.2 ne parle d'identité que pour les *services globaux*, et c'est lui qui détient les listes de confiance. |
+| **LDS** | non | L'identité d'une application qui consulte un registre de découverte n'a aucun intérêt normatif. Refuser les certificats non reconnus casserait les outils de diagnostic sans rien gagner. |
+
+Le refus porte le motif le plus précis possible : `BadCertificateUntrusted` pour
+une clé non déclarée, `BadCertificateRevoked` pour une révocation,
+`BadCertificateInvalid` pour un profil non conforme. Un statut unique obligerait
+le client à deviner, et il ne peut pas.
+
+> Un certificat **conforme et signé par l'autorité de confiance** est refusé s'il
+> n'a jamais été déclaré de confiance. Ce sont deux listes distinctes :
+> `issuer_certificates` prouve d'où vient une signature, `trusted_certificates`
+> dit à qui l'on fait confiance. Confondre les deux ferait de toute autorité une
+> source d'accès.
+
+### `Sign` n'est pas annoncé par défaut
+
+`Sign` protège l'intégrité sans protéger la confidentialité. Accepter `Sign`
+laisserait croire qu'une inscription est protégée alors qu'elle resterait
+**lisible sur le réseau** — ce qui est pire qu'un refus, parce que lillusion
+est confortable.
+
+La Part 12 impose `SignAndEncrypt` pour les opérations de gestion. Un client qui
+veut la confidentialité choisit `SignAndEncrypt`, toujours annoncé. Le champ
+`server.allow_sign_only` existe pour les déploiements qui acceptent explicitement
+ce compromis — il est **faux** par défaut.
+
+### Mode dégradé
+
+Sans certificat, le serveur démarre quand même et n'annonce que `NoSecurity`. Un
+simulateur doit rester utilisable. Ce qui ne doit pas passer, c'est que le mode
+dégradé passe **inaperçu** : l'avertissement nomme donc la conséquence —
+
+> *le serveur n'annoncera que NoSecurity, et la Part 12 ne pourra pas être
+> satisfaite — RegisterApplication exige un canal authentifié en SignAndEncrypt
+> (§6.5.6)*
+
+— et non la seule cause. Un opérateur doit savoir que le problème n'apparaîtra
+qu'à la première inscription, qui est le pire moment pour le découvrir.
+
+### Un piège de la pile, qui a coûté un cycle de tests
+
+La pile choisit son décodeur PEM/DER sur le **suffixe** du fichier, et ne
+connaît que `.pem` :
+
+```python
+if ext == ".pem" ...:
+    return serialization.load_pem_private_key(...)
+else:
+    return serialization.load_der_private_key(...)   # ← tout autre suffixe
+```
+
+Un fichier `.key` contenant du PEM échoue donc sur *« Could not deserialize key
+data »* — un message qui accuse le format alors que le format est bon et le nom
+faux. `tools/crypto_opcua.py` nomme ses fichiers `.pem`, ce qui masque
+totalement le piège.
+
 ## Autorité de certification (phases 0 et 1)
 
 L'amorçage §7.1 ci-dessus pose des **ancres auto-signées** : c'est le minimum
@@ -194,6 +285,10 @@ C'est une correction d'un diagnostic antérieur, qui concluait « asyncua ne le
 permet pas ». La réalité est plus petite et plus utile : **personne n'y a
 branché de validateur**. Tout le travail consiste à y brancher le nôtre.
 
+Le côté serveur est fait : `sciicad/trust.py` fournit `ChannelValidator`, et le
+GDS le branche sur `Server.set_certificate_validator`. Voir la section sur le
+canal sécurisé.
+
 Une limite structurelle reste : à l'ouverture du canal, asyncua **tronque la
 chaîne** et ne conserve que la feuille. Le client ne voit donc jamais l'autorité
 en transit — il doit l'apprendre par la liste de confiance du GDS, ce qui est la
@@ -202,11 +297,15 @@ conception voulue.
 Conséquence, à connaître avant de dire « le déploiement est sécurisé » :
 
 - `SignAndEncrypt` est **réel** : chiffrement et authentification des messages.
-- Tant qu'aucun validateur n'est branché, l'**identité** n'est pas vérifiée. Un
-  attaquant détenant son propre couple de clés serait accepté.
+- Côté serveur, l'**identité** est vérifiée : le GDS refuse une clé non
+  déclarée de confiance, et le contrôle est testé.
+- Côté client, l'**identité du serveur** n'est pas encore vérifiée. Un client se
+  connecte aujourd'hui sans contrôler le certificat qu'on lui présente. C'est le
+  reste de ce chantier : brancher `Client.certificate_validator` pour lire la
+  liste de confiance du GDS avant d'accepter une session.
 
-Le GDS sait déjà valider côté serveur ; c'est le côté client qui reste à câbler,
-et c'est le sens de `set_certificate_validator` / `Client.certificate_validator`.
+Autrement dit : un client SCIICAD ne peut pas encore proves qu'il parle au bon
+GDS. La direction du contrôle est donc à sens unique pour l'instant.
 
 ## Global Discovery Server — couche certificats, non exposée
 

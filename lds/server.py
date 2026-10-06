@@ -58,6 +58,20 @@ class DiscoveryServer:
         self._sweeper: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._closed = False
+        #: Validateur de certificat client, ou ``None``.
+        #:
+        #: Branché sur ``set_certificate_validator`` par
+        #: :meth:`_install_security` quand il existe. ``None`` pour un LDS :
+        #: l'identité d'un client qui consulte un registre de découverte n'a pas
+        #: d'intérêt normatif — Part 12 §6.2 ne parle d'identité de l'application
+        #: que pour les **services globaux**, c'est-à-dire le GDS. Un LDS qui
+        #: refuserait les certificats non reconnus casserait les outils de
+        #: diagnostic, sans rien gagner.
+        #:
+        #: Le GDS en attache un, parce que ses listes de confiance et son rôle
+        #: CertificateManager sont précisément ce qui donne un sens à « cette clé
+        #: est de confiance ».
+        self.certificate_validator = None
 
     def __del__(self) -> None:  # pragma: no cover - ramasse-miettes
         # Un objet abandonné sans stop() ne doit pas laisser son serveur dans
@@ -114,9 +128,21 @@ class DiscoveryServer:
             datetime.now(),
         )
 
-        # Un serveur de découverte ne doit exposer que NoSecurity : la
-        # découverte précède l'établissement d'un canal sécurisé.
-        self.server.set_security_policy([ua.SecurityPolicyType.NoSecurity])
+        # Un serveur de découverte DOIT accepter un canal sécurisé.
+        #
+        # L'ancien commentaire affirmait l'inverse — « la découverte précède
+        # l'établissement d'un canal sécurisé » — et c'était un sophisme. La
+        # découverte *anonyme* est bien possible en NoSecurity, mais elle
+        # n'inscrit rien : RegisterServer exige déjà un canal, et la Part 12 va
+        # plus loin en faisant du certificat du canal l'identité de
+        # l'application (§6.2) et en imposant SignAndEncrypt pour
+        # RegisterApplication (§6.5.6). Un serveur de découverte réduit à
+        # NoSecurity ne peut pas satisfaire ce rôle.
+        #
+        # NoSecurity reste annoncé : un client qui découvre doit pouvoir le
+        # faire sans certificat, et c'est ce qui permet à un client d'obtenir
+        # les endpoints sécurisés par GetEndpoints.
+        await self._install_security(server_cfg)
         self.server.discovery_server_flag = True
 
         if cfg.database.enabled:
@@ -133,6 +159,92 @@ class DiscoveryServer:
 
         services.install(enable_find_servers_on_network=cfg.discovery.find_servers_on_network)
         _live_servers.add(self)
+
+    async def _install_security(self, server_cfg) -> None:
+        """Charge le certificat et annonce les politiques de sécurité.
+
+        Trois décisions, dont deux ne sont pas des préférences.
+
+        **L'échec de chargement est un avertissement, pas une erreur.** Un
+        simulateur doit rester utilisable sans certificat, et un serveur de
+        découverte sans certificat est un mode dégradé réel — mais un serveur
+        qui refuse de démarrer est un déploiement cassé. Ce qui doit rester
+        impossible, c'est que le mode dégradé passe **inaperçu** : c'est
+        pourquoi l'avertissement nomme la conséquence, pas seulement la cause.
+
+        **``Sign`` n'est pas annoncé par défaut.** Sign protège l'intégrité
+        sans protéger la confidentialité. La Part 12 impose SignAndEncrypt pour
+        les opérations de gestion ; accepter Sign laisserait croire qu'une
+        inscription est protégée alors qu'elle resterait lisible sur le réseau.
+        Un client qui veut la confidentialité choisit SignAndEncrypt, toujours
+        annoncé. Le champ ``allow_sign_only`` existe pour les déploiements qui
+        acceptent explicitement ce compromis.
+
+        **La validation du certificat client est branchée** dès qu'un magasin
+        existe. C'est là que la Part 12 prend le certificat du canal pour
+        l'identité de l'application : sans ce validateur, un canal SignAndEncrypt
+        prouve qu'un client détient une clé privée — ce qui est vrai et
+        insuffisant, puisque le canal chiffré empêche l'écoute mais pas
+        l'usurpation d'une identité de confiance.
+        """
+        policies = [ua.SecurityPolicyType.NoSecurity]
+        certificate, private_key = server_cfg.certificate_paths()
+
+        if certificate is None:
+            missing = (
+                "server.certificate n'est pas configuré"
+                if not server_cfg.certificate
+                else "server.certificate ou server.private_key manque (il faut les deux)"
+            )
+            logger.warning(
+                f"Mode dégradé : {missing}. Le serveur n'annoncera que NoSecurity, "
+                f"et la Part 12 ne pourra pas être satisfaite — RegisterApplication "
+                f"exige un canal authentifié en SignAndEncrypt (§6.5.6). Générez "
+                f"les certificats avec tools/bootstrap_certificates.py."
+            )
+            self.server.set_security_policy(policies)
+            return
+
+        try:
+            await self.server.load_certificate(certificate)
+            await self.server.load_private_key(private_key)
+        except Exception as exc:
+            logger.warning(
+                f"Certificat illisible ({exc}) : seul NoSecurity sera annoncé. "
+                f"Le serveur reste utilisable, mais la Part 12 ne pourra pas être "
+                f"satisfaite — RegisterApplication exige un canal authentifié en "
+                f"SignAndEncrypt (§6.5.6), et le certificat du canal est l'identité "
+                f"de l'application (§6.2)."
+            )
+            self.server.set_security_policy(policies)
+            return
+
+        policies.append(ua.SecurityPolicyType.Basic256Sha256_SignAndEncrypt)
+        if server_cfg.allow_sign_only:
+            policies.append(ua.SecurityPolicyType.Basic256Sha256_Sign)
+        self.server.set_security_policy(policies)
+
+        validator = self.certificate_validator
+        if validator is not None:
+            self.server.set_certificate_validator(validator)
+            logger.info(
+                "Validation des certificats clients activee : un canal securise "
+                "ne vaut plus qu'au titre de la cle presentee."
+            )
+        else:
+            logger.warning(
+                "Aucun validateur de certificat client n'est rattache : un canal "
+                "SignAndEncrypt prouvera la possession d'une cle privee, sans "
+                "prouver l'identite. C'est le cas d'un LDS ; le GDS, qui porte le "
+                "role CertificateManager, en attache un."
+            )
+
+        logger.info(
+            f"Canal securise disponible : Basic256Sha256_SignAndEncrypt "
+            f"(certificat {certificate})"
+            + (" + Sign" if server_cfg.allow_sign_only else "")
+            + f", aux cote de NoSecurity pour la decouverte anonyme."
+        )
 
     # -- cycle de vie -------------------------------------------------------
 

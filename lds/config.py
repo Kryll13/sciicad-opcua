@@ -50,6 +50,46 @@ class ServerConfig(BaseModel):
     # /GlobalDiscoveryServer, ce que la Part 12 fixe pour ce rôle.
     endpoint_path: str = ""
 
+    #: Certificat d'application du serveur.
+    #:
+    #: Son existence est une **obligation**, pas une option. La Part 12 fait du
+    #: certificat du canal l'identite de l'application : « The Certificate used
+    #: to create the SecureChannel is used to determine the identity of the OPC
+    #: UA Application » (6.2), et RegisterApplication « shall be called from an
+    #: authenticated SecureChannel » avec « MessageSecurityMode
+    #: SignAndEncrypt » (6.5.6). Un serveur de decouverte qui n'annonce que
+    #: NoSecurity ne peut donc **pas** satisfaire ce role.
+    #:
+    #: L'affirmation contraire — « la decouverte precede l'etablissement d'un
+    #: canal securise » — etait un sophisme : la decouverte anonyme est bien
+    #: possible en NoSecurity, mais ce n'est pas elle qui inscrit, et ce n'est
+    #: pas elle qui gere les certificats. Ces deux operations exigent un canal
+    #: authentifie, donc un certificat serveur.
+    #:
+    #: Vide, le serveur demarre quand meme et n'annonce que NoSecurity.
+    #: L'avertissement le dit : c'est un mode degrade, pas un equivalent.
+    certificate: Optional[str] = None
+
+    #: Cle privee correspondant au certificat ci-dessus.
+    private_key: Optional[str] = None
+
+    #: Autoriser un canal Sign (signature sans chiffrement) en plus de
+    #: SignAndEncrypt.
+    #:
+    #: Defaut **faux**, et ce n'est pas une preference de style : Sign protege
+    #: l'integrite sans proteger la confidentialite. La Part 12 exige
+    #: SignAndEncrypt pour les operations de gestion, et accepter Sign
+    #: laisserait un client pretendre proteger une inscription tout en la
+    #: laissant lisible. Un client qui veut la confidentialite choisit
+    #: SignAndEncrypt, qui est toujours annonce.
+    allow_sign_only: bool = False
+
+    def certificate_paths(self) -> tuple[Optional[str], Optional[str]]:
+        """Les deux chemins, ou ``(None, None)`` si le mode non securise."""
+        if self.certificate and self.private_key:
+            return self.certificate, self.private_key
+        return None, None
+
     @field_validator("port")
     @classmethod
     def _check_port(cls, value: int) -> int:

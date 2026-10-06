@@ -37,6 +37,7 @@ from .trustlist import (
     load_issuer_crls,
     load_trusted_certificates,
 )
+from sciicad.trust import ChannelValidator
 
 
 class GlobalDiscoveryServer(DiscoveryServer):
@@ -59,6 +60,11 @@ class GlobalDiscoveryServer(DiscoveryServer):
         self.server_configuration: Optional[ServerConfigurationNode] = None
         #: Émetteur d'audit OPC UA, ou ``None`` si désactivé ou indisponible.
         self.audit: Optional[AuditEmitter] = None
+        # Contrairement au LDS, le GDS valide les certificats clients : c'est
+        # lui qui détient les listes de confiance, donc lui seul peut dire si
+        # une clé est de confiance. Part 12 §6.2 en fait le support de
+        # l'identité de l'application pour les services globaux.
+        self.certificate_validator = ChannelValidator()
 
     async def setup(self) -> None:
         """Assemble le serveur, puis publie les objets de certificats."""
@@ -226,6 +232,13 @@ class GlobalDiscoveryServer(DiscoveryServer):
             hostnames=self.config.certificates.hostnames,
             key_size=self.config.certificates.key_size,
         )
+        # Le GDS attache son validateur **après** la construction du magasin :
+        # c'est le magasin qui détient les listes de confiance, et un validateur
+        # rattaché à rien refuserait tout — ce qui est le comportement correct
+        # pour une ancre absente, mais ici seulement parce que l'ordre est
+        # faux. L'ordre des deux lignes est donc signifiant, pas cosmetic.
+        if self.certificate_validator is not None:
+            self.certificate_validator.bind(self.certificate_store)
         self.server_configuration = ServerConfigurationNode(
             self.server,
             self.certificate_store,

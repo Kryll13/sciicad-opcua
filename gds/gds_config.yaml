@@ -20,6 +20,23 @@ server:
   # de la machine ne l'est pas necesariamente.
   advertise_host: null
 
+  # Certificat applicatif et cle privee. Leur presence est une OBLIGATION pour
+  # un serveur de decouverte, pas une precaution : Part 12 6.2 fait du
+  # certificat du canal l'IDENTITE de l'application, et 6.5.6 impose
+  # SignAndEncrypt pour RegisterApplication. Un serveur de decouverte qui
+  # n'annonce que NoSecurity ne peut pas satisfaire ce role.
+  #
+  # Vides, le serveur demarre quand meme en mode degrade, et l'avertissement le
+  # dit en nommant la consequence — parce qu'un mode degrade passe inaperçu
+  # jusqu'a la premiere inscription, ce qui est le pire moment pour le decouvrir.
+  certificate: gds/server_certificate.pem
+  private_key: gds/server_private_key.pem
+
+  # Sign protege l'integrite sans proteger la confidentialite. Faux par defaut :
+  # accepter Sign laisserait croire qu'une inscription est protegee alors qu'elle
+  # resterait lisible. Basic256Sha256_SignAndEncrypt reste toujours annonce.
+  allow_sign_only: false
+
   application_name: SCIICAD GDS
   application_uri: urn:SCIICAD:gds
   product_uri: urn:SCIICAD:product:gds
