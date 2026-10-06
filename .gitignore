@@ -26,12 +26,21 @@
 certificates/
 certificate-stores/
 
-# Ancrage de confiance, Part 12 §7.1. Tout ce que contient pki/trusted/ est
-# produit par tools/bootstrap_certificates.py et se régénère ; les clés privées,
-# elles, sont dans les répertoires des rôles, et *.pem les couvre déjà — cette
-# entrée rend la destination visible sans qu'il faille connaître le glob.
-# Ne jamais versionner pki/ : ce serait publier les clés de l'ancrage avec la
-# confiance qu'elles confèrent.
+# Ancrage de confiance et autorité, Part 12 §7.1. Tout ce que contient pki/ est
+# produit par tools/bootstrap_certificates.py et tools/authority.py, et se
+# régénère. Les clés privées, elles, vivent dans ~/.sciicad/ca/, hors du dépôt.
+#
+# Ne jamais versionner pki/ : ce serait publier le certificat de l'autorité avec
+# la confiance qu'il confère, et faire de chaque membre du dépôt une autorité de
+# certification de fait.
+#
+# L'entrée est explicite même si les globs *.pem couvrent déjà les fichiers
+# actuels, pour deux raisons. La destination devient lisible sans qu'il faille
+# connaître le glob ; et un fichier d'un suffixe non listé — une sauvegarde, un
+# export — ne se retrouverait pas nu par un oubli du glob. Le commentaire
+# promettait cette protection avant que la règle n'existe : un commentaire qui
+# annonce une règle absente fait croire à une protection qui n'est pas là.
+pki/
 
 # ============================================================================
 # Bases de données
