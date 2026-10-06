@@ -455,6 +455,34 @@ Contrôle négatif du contrôle négatif : neutraliser `_check_application_profi
 fait passer les trois refus à `Good`, et l'auto-test échoue. C'est ce qui
 prouve qu'il exerce réellement le contrôle.
 
+### `selftest_client_trust.py` — validation du certificat serveur, côté client
+
+```bash
+python tools/selftest_client_trust.py
+```
+
+Reproduit l'attaque que la validation empêche : un **homme du milieu** qui
+intercepte le canal, présente son propre certificat — profil-conforme, et même
+signé par l'autorité de confiance — et relaie.
+
+Le test construit l'imposteur le plus dangereux, celui qui passe les deux
+premiers contrôles : son certificat est valide, sa chaîne est correcte, et il
+porte l'URI d'une application **réellement présente** dans le déploiement. Il
+n'échoue que sur le troisième contrôle — l'URI attendue.
+
+Vérifié aussi : refus d'un certificat révoqué par une CRL connue du client ;
+**acceptance** d'un certificat valide dont aucune CRL n'est connue ; et
+**acceptance** malgré une CRL au bon nom d'émetteur mais signée par une autre
+clé — la même leçon que pour le GDS, appliquée de ce côté.
+
+**E2E** : un client validé se connecte à un vrai GDS et parcourt l'espace
+d'adressage (24 nœuds), puis un serveur factice se voit refuser.
+
+> **Le contrôle d'absence est le plus important.** Branché au validateur, le
+> faux serveur est refusé ; le même client sans validateur se connecte. Sans
+> cette comparaison, le test ne prouverait qu'un refus, pas qu'il vient du
+> validateur.
+
 ### `selftest_secure_channel.py` — canal sécurisé du LDS et du GDS (phase 2)
 
 ```bash

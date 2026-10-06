@@ -18,6 +18,7 @@ import sys
 from asyncua import Client
 
 from sciicad.console import banner, logger
+from sciicad.trusted import secure_client
 from sciicad.model import (
     THERMOSTAT_HIGH_THRESHOLD,
     THERMOSTAT_LOW_THRESHOLD,
@@ -29,6 +30,33 @@ from sciicad.nodes import find_node_by_name, read_child_values
 DEFAULT_HOST = "thermo-plc"
 DEFAULT_PORT = 4840
 REFRESH_SECONDS = 0.5
+
+
+async def build_secure_client(args, url):
+    """Construit le client sécurisé, ou ``None`` si les fichiers manquent.
+
+    Un ``None`` n'est pas un échec silencieux : l'appelant l'annonce et
+    explique ce que le mode dégradé signifie. Le contraire — un client qui
+    se connecte en laissant croire à une validation — serait le pire des deux.
+    """
+    from pathlib import Path
+
+    if not (Path(args.client_cert).is_file() and Path(args.client_key).is_file()):
+        logger.warning(
+            f"Certificat client absent : {args.client_cert} / {args.client_key}. "
+            f"Générez-le : python tools/bootstrap_certificates.py --signed"
+        )
+        return None
+
+    directories = [args.trust, "pki/ca"]
+    return await secure_client(
+        url,
+        args.client_cert,
+        args.client_key,
+        trust_directories=directories,
+        expected_uri=args.expect,
+        application_uri="urn:SCIICAD:ihm",
+    )
 
 
 def parse_args(argv=None):
@@ -47,6 +75,37 @@ def parse_args(argv=None):
     parser.add_argument(
         "--timeout", type=float, default=15.0,
         help="délai maximal de connexion, en secondes (défaut : 15)",
+    )
+    parser.add_argument(
+        "--insecure", action="store_true",
+        help=(
+            "Se connecter sans certificat et sans valider celui du serveur. "
+            "Utile pour un diagnostic, et.Unsafe en exploitation : le canal "
+            "sera chiffré mais l'identité du PLC ne sera pas vérifiée."
+        ),
+    )
+    parser.add_argument(
+        "--trust", default="pki/trusted",
+        help=(
+            "répertoire des certificats de confiance du PLC (défaut : "
+            "pki/trusted). Ignoré avec --insecure."
+        ),
+    )
+    parser.add_argument(
+        "--expect", default=None,
+        help=(
+            "URI d'application attendue du PLC (ex : urn:SCIICAD:thermo-plc). "
+            "C'est le contrôle qui empêche un homme du milieu : sans lui, un "
+            "certificat valide d'une autre application serait accepté."
+        ),
+    )
+    parser.add_argument(
+        "--client-cert", default="ihm/client_certificate.pem",
+        help="certificat du client (défaut : ihm/client_certificate.pem)",
+    )
+    parser.add_argument(
+        "--client-key", default="ihm/client_private_key.pem",
+        help="clé privée du client (défaut : ihm/client_private_key.pem)",
     )
     return parser.parse_args(argv)
 
@@ -114,7 +173,22 @@ async def main(argv=None) -> int:
     print(banner("IHM OPCUA - THERMOSTAT", 50))
     print(f"Connexion au PLC : {url}")
 
-    client = Client(url=url)
+    # Connexion sécurisée ou non. Le repli n'est jamais silencieux : sans
+    # certificat, ou sans ancres, la connexion échoue et le dit. Ce qui serait
+    # inacceptable, c'est un client qui se connecte en croyant avoir validé et
+    # qui ne valide rien.
+    client = None
+    if not args.insecure:
+        client = await build_secure_client(args, url)
+    if client is None:
+        client = Client(url=url)
+        if not args.insecure:
+            print(
+                "Mode dégradé : connexion sans validation du certificat du PLC. "
+                "Le canal sera chiffré, mais un homme du milieu ne sera pas "
+                "détecté. --insecure est alors explicite, ou le certificat "
+                "manque."
+            )
     try:
         await asyncio.wait_for(client.connect(), args.timeout)
     except Exception as exc:

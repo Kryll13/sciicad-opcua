@@ -143,6 +143,104 @@ Un ancrage visant un groupe non rattaché est signalé et **ignoré, jamais
 redirigé** : placé dans le mauvais groupe, il accepterait des présentations qui
 ne doivent pas l'être.
 
+## Validation côté client (phase 3)
+
+### Le dernier trou de la chaîne
+
+Le GDS valide ses clients depuis la phase 2. L'inverse n'était pas fait : un
+client se connectait **sans vérifier le certificat qu'on lui présentait**.
+
+Un homme du milieu n'a pas besoin de casser la cryptographie. Il intercepte
+`OpenSecureChannel`, présente son propre certificat et relaie. Chaque message
+reste parfaitement chiffré et authentifié — **pour lui**, qui détient la clé
+correspondant au certificat qu'il présente.
+
+> Le chiffrement empêche l'**écoute**, pas l'**usurpation**.
+
+Sans validation, la seule chose qui distingue le vrai GDS d'un imposteur est
+l'adresse à laquelle on s'est connecté.
+
+### Trois contrôles, un seul que l'attaquant ne peut pas contourner
+
+| Contrôle | Ce qu'il prouve | Contournable ? |
+|---|---|---|
+| **chaîne** — le certificat remonte à une ancre | il vient d'une autorité déclarée | oui, avec une autorité compromise |
+| **cohérence** — l'URI déclarée est dans le SAN | le serveur ne ment pas sur son certificat | oui, avec un certificat valide |
+| **attente** — l'URI déclarée est celle qu'on attendait | **c'est bien *ce* serveur** | **non** |
+
+Le troisième est celui qu'on ne fait pas spontanément, et le seul qui prévienne
+l'usurpation d'un serveur connu. Un imposteur présentant un certificat valide,
+signé par l'autorité du déploiement, portant l'URI d'une application
+**réellement présente** — Satisfait les deux premiers et échoue au troisième. Il
+contrôle ce qu'il présente, pas ce qu'on attend.
+
+L'auto-test construit exactement cet imposteur, et le serveur factice auquel il
+correspond.
+
+### Un défaut du dépôt que cette étape a révélé
+
+`pki/trusted/` ne contenait que des **feuilles**. Dès qu'une autorité existe, un
+certificat d'application n'est pas auto-signé : une signature ne se vérifie
+qu'avec la clé de celui qui a signé. Un client ne connaissant que la feuille
+**ne pouvait pas** la valider.
+
+Un client charge donc **deux répertoires** :
+
+```python
+trust_directories = ["pki/trusted", "pki/ca"]   # applications ET autorité
+```
+
+C'est la hiérarchie de confiance, et c'est un défaut de la phase 1 qu'aucun test
+ne pouvait voir : tant qu'aucun client ne validait, la question ne se posait pas.
+
+### La confiance ne vient jamais du réseau
+
+Une ancre téléchargée depuis le serveur qu'elle authentifie ne prouve rien —
+elle prouve que le serveur sait se présenter, ce qui est précisément la question.
+Les répertoires sont donc **locaux**, comme pour le GDS : c'est le même problème
+d'amorçage, avec la même solution (§7.1).
+
+Ce que la Part 12 apporte ici : §7.1 ne dit pas seulement « hors bande », elle
+donne la **place** où poser cette confiance. Le modèle *Push* du GDS
+(`UpdateCertificate`, §7.10.5) fournit le mécanisme qui permet de **remplacer**
+une ancre sans réinstaller la configuration. Ce n'est pas implémenté ici — c'est
+le prochain chantier, et ce n'est pas bloquant tant que les ancres sont
+valides.
+
+### L'IHM
+
+```bash
+python ihm/ihm_client.py --host 127.0.0.1 --expect urn:SCIICAD:thermo-plc
+```
+
+`--expect` est le contrôle qui empêche l'homme du milieu. Sans lui, les deux
+autres contrôles seraient satisfaits par un certificat valide d'une autre
+application.
+
+| Option | Rôle |
+|---|---|
+| `--expect URI` | URI attendue — **le contrôle qui compte** |
+| `--trust RÉPERTOIRE` | certificats de confiance (défaut `pki/trusted`) |
+| `--client-cert` / `--client-key` | identité du client |
+| `--insecure` | connexion non validée, explicite et assumée |
+
+Le mode dégradé **s'annonce**. Un client qui se connecte en laissant croire à
+une validation serait le pire des deux — l'illusion est confortable, et c'est
+exactement ce que `--insecure` rend visible.
+
+> Un client a besoin d'un certificat comme un serveur : il s'identifie en
+> présentant le sien, et les serveurs doivent le déclarer de confiance. `ihm/` est
+> donc un cinquième rôle du bootstrap, avec des fichiers `client_*`. Le nom
+> compte : un `server_certificate.pem` dans le répertoire d'un client dirait dans
+> un journal qu'il est ce qu'il n'est pas.
+
+### Ce qui n'est pas fait
+
+Les **PLC** n'ont pas de validateur de certificat client. L'identité d'un client
+qui consulte une variable de température n'a pas d'intérêt normatif, mais c'est
+une décision de déploiement et non une règle : une commande de protection
+mériterait sans doute mieux. À trancher, pas à laisser implicite.
+
 ## Canal sécurisé du LDS et du GDS (phase 2)
 
 ### Ce que la norme exige, et que l'ancien code niait

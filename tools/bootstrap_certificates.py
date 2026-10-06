@@ -77,6 +77,10 @@ class Role:
     directory: Path
     application_uri: str
     description: str
+    #: Préfixe des fichiers produits. Un client n'a pas de « server_certificate »
+    #: : le nom serait faux, et il le resterait pour quiconque le lirait. Le
+    #: préfixe est donc porté par le rôle plutôt que supposé.
+    prefix: str = "server"
 
 
 #: Les quatre roles. Les URI d'application sont ceux que les serveurs annoncent
@@ -108,6 +112,17 @@ ROLES: tuple[Role, ...] = (
         Path("protect-plc"),
         "urn:SCIICAD:protect-plc",
         "simulateur de protection",
+    ),
+    # Un client a besoin d'un certificat au même titre qu'un serveur : il
+    # s'identifie en présentant le sien. Et il doit être déclaré de confiance
+    # par les serveurs, sans quoi tous les serveurs le refusent — le refus
+    # serait correct, mais il rendrait l'IHM inutilisable.
+    Role(
+        "ihm",
+        Path("ihm"),
+        "urn:SCIICAD:ihm",
+        "interface de supervision",
+        prefix="client",
     ),
 )
 
@@ -191,9 +206,9 @@ def issue_for(
         )
         return None
 
-    cert_path = role.directory / "server_certificate.pem"
-    key_path = role.directory / "server_private_key.pem"
-    csr_path = role.directory / "server_certificate.csr"
+    cert_path = role.directory / f"{role.prefix}_certificate.pem"
+    key_path = role.directory / f"{role.prefix}_private_key.pem"
+    csr_path = role.directory / f"{role.prefix}_certificate.csr"
     if cert_path.exists() and key_path.exists() and not force:
         public = install_public_copy(cert_path, role)
         logger.info(
@@ -212,6 +227,7 @@ def issue_for(
     key_path, csr_path = generate_csr(
         hostname=primary,
         output_dir=str(role.directory),
+        prefix=role.prefix,
         key_size=key_size,
         application_uri=role.application_uri,
     )
@@ -271,8 +287,8 @@ def generate_for(
     confiance ne pourrait plus valider. C'est pourquoi l'outil refuse
     d'écraser sans ``--force``, et dit ce qu'il va casser quand on le demande.
     """
-    cert_path = role.directory / "server_certificate.pem"
-    key_path = role.directory / "server_private_key.pem"
+    cert_path = role.directory / f"{role.prefix}_certificate.pem"
+    key_path = role.directory / f"{role.prefix}_private_key.pem"
     if cert_path.exists() and key_path.exists() and not force:
         # Le couple existe, mais l'ancre est une copie distincte : un
         # répertoire pki/ effacé, un déploiement repris chez un tiers, un

@@ -158,6 +158,7 @@ def generate_csr(
     output_dir: str = ".",
     key_size: int = 2048,
     application_uri: str = "",
+    prefix: str = "server",
 ):
     """Génère une clé privée et la demande de signature correspondante.
 
@@ -170,6 +171,8 @@ def generate_csr(
     produit. Il n'y a donc pas de ``server_certificate.pem`` écrit, et c'est
     voulu — écrire un auto-signé pour le remplacer ensuite ferait subsister un
     instant où le serveur annonce une identité qu'aucune autorité ne soutient.
+
+    :param prefix: préfixe des noms de fichiers — ``server`` ou ``client``.
 
     Retourne ``(chemin_cle, chemin_demande)``.
     """
@@ -196,8 +199,11 @@ def generate_csr(
         .sign(private_key, hashes.SHA256())
     )
 
-    key_path = directory / "server_private_key.pem"
-    csr_path = directory / "server_certificate.csr"
+    # Les noms suivent le préfixe du rôle : « server_… » pour un serveur,
+    # « client_… » pour un client. Un client qui s'appellerait server_certificate
+    # ferait dire à un journal qu'il est ce qu'il n'est pas.
+    key_path = directory / f"{prefix}_private_key.pem"
+    csr_path = directory / f"{prefix}_certificate.csr"
 
     key_path.touch(mode=0o600, exist_ok=True)
     key_path.chmod(0o600)

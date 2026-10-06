@@ -149,8 +149,8 @@ def check_files(report: Report) -> dict[str, bytes]:
     """Vérifie les fichiers déposés, et rend les DER des quatre ancres."""
     anchors: dict[str, bytes] = {}
     for role in ROLES:
-        cert_path = role.directory / "server_certificate.pem"
-        key_path = role.directory / "server_private_key.pem"
+        cert_path = role.directory / f"{role.prefix}_certificate.pem"
+        key_path = role.directory / f"{role.prefix}_private_key.pem"
         if not (cert_path.is_file() and key_path.is_file()):
             report.check(
                 f"{role.name} : couple certificat/clé présent",

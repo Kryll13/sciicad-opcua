@@ -281,7 +281,7 @@ def check_authority(report: Report, lab: Lab) -> None:
 def check_signed_roles(report: Report) -> None:
     """Les quatre rôles portent-ils un certificat signé et conforme ?"""
     for role in ROLES:
-        path = role.directory / "server_certificate.pem"
+        path = role.directory / f"{role.prefix}_certificate.pem"
         if not path.is_file():
             report.check(
                 f"{role.name} : certificat présent",
