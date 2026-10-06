@@ -218,38 +218,75 @@ def build_signing_request(
     return builder.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
 
 
-def _verify_signature(certificate: x509.Certificate, issuer_public_key) -> bool:
-    """Vérifie la signature d'un certificat avec une clé publique d'émetteur.
+def _load_pkcs12_key(payload: bytes):
+    """Lit la clé privée d'un PKCS #12, quelle que soit la version de la pile.
 
-    Deux remplissages RSA sont essayés parce que rien dans le certificat ne
-    dit lequel a été utilisé : PKCS #1 v1.5 d'abord, puis PSS. Les deux
-    algorithmes de hachage sont déduits de la signature elle-même.
+    ``serialization.load_der_pkcs12_private_key`` a disparu de
+    ``cryptography`` : depuis la 46.0 l'API est
+    ``serialization.pkcs12.load_key_and_certificates``, qui rend un tuple
+    *éventuellement vide*. L'appel de l'ancienne forme échoue par
+    ``AttributeError`` — donc **tout** PKCS #12 était refusé, avec un message
+    qui parlait de format illisible alors que le format était parfait et
+    l'appel nonexistent.
+
+    La distinction est maintained parce qu'elle ne se voit pas : une
+    ``AttributeError`` est un défaut de code, pas un problème de données, et
+    les deux se présentent par la même exception si on les laisse fusionner.
     """
-    hash_algorithm = certificate.signature_hash_algorithm
-    if isinstance(issuer_public_key, rsa.RSAPublicKey):
-        for pad in (padding.PKCS1v15(), padding.PSS(mgf=padding.MGF1(hash_algorithm), salt_length=padding.PSS.DIGEST_LENGTH)):
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    result = pkcs12.load_key_and_certificates(payload, None)
+    key = result[0] if isinstance(result, tuple) else result
+    if key is None:
+        raise ValueError("le PKCS #12 ne contient aucune clé privée")
+    return key
+
+
+def _verify_raw(signature: bytes, tbs: bytes, hash_algorithm, public_key) -> bool:
+    """Vérifie une signature against une clé publique, quel que soit le porteur.
+
+    ``tbs`` est le bloc à signer : ``tbs_certificate_bytes`` pour un
+    certificat, ``tbs_certlist_bytes`` pour une CRL. Les deux portent la même
+    structure, ce qui rend la vérification commune — et il est utile qu'elle le
+    soit, parce qu'une CRL non vérifiée est le trou de ce module.
+
+    Deux remplissages RSA sont essayés parce que rien dans le bloc ne dit
+    lequel a été utilisé : PKCS #1 v1.5 d'abord, puis PSS. Les deux algorithmes
+    de hachage sont déduits de la signature elle-même.
+    """
+    if hash_algorithm is None:
+        return False
+    if isinstance(public_key, rsa.RSAPublicKey):
+        for pad in (
+            padding.PKCS1v15(),
+            padding.PSS(
+                mgf=padding.MGF1(hash_algorithm),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+        ):
             try:
-                issuer_public_key.verify(
-                    certificate.signature,
-                    certificate.tbs_certificate_bytes,
-                    pad,
-                    hash_algorithm,
-                )
+                public_key.verify(signature, tbs, pad, hash_algorithm)
                 return True
             except InvalidSignature:
                 continue
         return False
-    if isinstance(issuer_public_key, ec.EllipticCurvePublicKey):
+    if isinstance(public_key, ec.EllipticCurvePublicKey):
         try:
-            issuer_public_key.verify(
-                certificate.signature,
-                certificate.tbs_certificate_bytes,
-                ec.ECDSA(hash_algorithm),
-            )
+            public_key.verify(signature, tbs, ec.ECDSA(hash_algorithm))
             return True
         except InvalidSignature:
             return False
     return False
+
+
+def _verify_signature(certificate: x509.Certificate, issuer_public_key) -> bool:
+    """Vérifie la signature d'un certificat avec une clé publique d'émetteur."""
+    return _verify_raw(
+        certificate.signature,
+        certificate.tbs_certificate_bytes,
+        certificate.signature_hash_algorithm,
+        issuer_public_key,
+    )
 
 
 def _check_application_profile(certificate: x509.Certificate) -> None:
@@ -361,11 +398,32 @@ def _has(flags: int, flag_name: str) -> bool:
 
 
 def _crls_for(crls: list[bytes], issuer: x509.Certificate) -> list[x509.Certificate]:
-    """CRL de la liste qui sont émises par ``issuer``.
+    """CRL de la liste qui sont **signées par** ``issuer``.
 
-    Une CRL porte le nom de son émetteur : l'appliquer sans cette vérification
-    ferait qu'une CRL d'une autorité sans rapport pourrait révoquer — ou
-    blanchir — un certificat sans lien avec elle.
+    L'appariement se fait sur le **nom** de l'émetteur *et* sur la **signature**.
+    Le nom seul ne suffit pas, et cette insuffisance était un trou réel : une
+    liste de confiance s'alimente par ``Write`` (le seul chemin normatif de
+    diffusion des CRL), donc quiconque est autorisé à écrire dans
+    ``issuer_crls`` peut y déposer une CRL portant le nom de la CA de confiance
+    — et la faire appliquer. La signature de cette CRL ne correspondant à rien
+    de vérifiable, elle était malgré tout utilisée pour révoquer des
+    certificats.
+
+    Ce n'est pas une hypothèse : le contrôle négatif de
+    ``tools/selftest_revocation.py`` reproduit exactement ce cas, avec une CRL
+    portant le bon nom et une clé étrangère. Le contrôle était vert parce que
+    cette CRL était ignorée — mais pour la mauvaise raison : elle était ignorée
+    parce qu'aucune CRL n'était applicable du tout, non parce que sa signature
+    avait été vérifiée. Il suffisait d'ajouter la CRL authentique pour que la
+    version non vérifiée commence à révoquer.
+
+    Le tri se fait donc par signature vérifiée, et une CRL qui ne la valide pas
+    est écartée avec un avertissement qui nomme l'émetteur attendu. Elle
+    n'apparaît donc pas dans les CRL applicables, ce qui la conduit au chemin
+    « état de révocation inconnu » — où le comportement est déjà défini, et
+    où ``SuppressRevocationStatusUnknown`` joue son rôle. Une CRL étrangère
+    ne peut ainsi ni révoquer (sa signature ne vaut rien) ni blanchir (les
+    révocations sont une union, pas une intersection).
     """
     applicable: list[x509.Certificate] = []
     for raw in crls:
@@ -374,21 +432,48 @@ def _crls_for(crls: list[bytes], issuer: x509.Certificate) -> list[x509.Certific
         except Exception:
             logger.warning("CRL illisible dans issuer_crls, ignorée")
             continue
-        if crl.issuer == issuer.subject:
-            applicable.append(crl)
+        if crl.issuer != issuer.subject:
+            continue
+        if not _verify_raw(
+            crl.signature,
+            crl.tbs_certlist_bytes,
+            crl.signature_hash_algorithm,
+            issuer.public_key(),
+        ):
+            logger.warning(
+                f"CRL ignorée : elle porte le nom d'émetteur "
+                f"{issuer.subject.rfc4514_string()!r} mais sa signature ne se "
+                f"vérifie pas avec la clé de ce certificat. Une CRL non signée "
+                f"par l'émetteur de confiance ne peut ni révoquer ni blanchir."
+            )
+            continue
+        applicable.append(crl)
     return applicable
 
 
 def _is_revoked(crl: x509.Certificate, certificate: x509.Certificate) -> bool:
-    """Vrai si la CRL liste le numéro de série du certificat."""
+    """Vrai si la CRL liste le numéro de série du certificat.
+
+    Une interrogation qui échoue **ne vaut pas** « non révoqué ». Le
+    commentaire précédent affirmait le contraire du code, qui rendait
+    ``False`` : une CRL à moitié lisible valait autorisation de suite. Ici
+    l'échec remonte, et le refus qui en découle est un refus par prudence —
+    l'état de révocation est inconnu, ce qui est précisément la situation que
+    §7.8.2.10 traite et que ``SuppressRevocationStatusUnknown`` permet de
+    laisser passer.
+    """
     try:
         return (
             crl.get_revoked_certificate_by_serial_number(certificate.serial_number)
             is not None
         )
-    except Exception:
-        # Une CRL illisible ne vaut pas « non révoqué ».
-        return False
+    except Exception as exc:
+        raise CertificateError(
+            f"CRL illisible pour le certificat de série "
+            f"{certificate.serial_number:x} : l'état de révocation est "
+            f"inconnu ({exc})",
+            ua.StatusCodes.BadCertificateRevoked,
+        ) from exc
 
 
 def _public_key_of(key) -> bytes:
@@ -679,7 +764,7 @@ class CertificateStore:
             )
             return None
         try:
-            key, _, _ = serialization.load_der_pkcs12_private_key(private_key, None)
+            key = _load_pkcs12_key(private_key)
         except Exception as exc:
             raise _invalid(f"clé privée PKCS #12 illisible : {exc}") from exc
         with self._lock:

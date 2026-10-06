@@ -57,7 +57,8 @@ from loguru import logger
 
 # Reuse le générateur deja eprouve plutot que de dupliquer le profil Table 50.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from crypto_opcua import generate  # noqa: E402
+from authority import CA_CERT, CA_KEY  # noqa: E402
+from crypto_opcua import generate, generate_csr  # noqa: E402
 
 #: Repertoire des certificats publics destines a la liste de confiance du GDS.
 TRUSTED_DIR = Path("pki/trusted")
@@ -149,6 +150,113 @@ def install_public_copy(cert_path: Path, role: Role) -> Path:
     return target
 
 
+def issue_for(
+    role: Role,
+    hostnames: list[str],
+    key_size: int,
+    validity_days: int,
+    force: bool,
+) -> tuple[Path, Path] | None:
+    """Produit un couple **signé par l'autorité** pour un rôle.
+
+    Le chemin normal d'un déploiement à autorité. La clé privée est générée
+    ici et n'est jamais confiée : elle reste dans le répertoire du rôle, et
+    seule la demande de signature sort. C'est le principe du §7.10.4, dont
+    cette étape est l'équivalent hors bande pour une application que le GDS ne
+    gère pas.
+
+    Séquence en trois temps, volontairement séparés :
+
+    1. la clé et la demande sont produites **dans le répertoire du rôle** ;
+    2. l'autorité signe cette demande, et **écrit le certificat à côté** ;
+    3. l'ancre publique est déposée dans ``pki/trusted/``.
+
+    L'étape 1 ne produit aucun certificat. C'est ce qui distingue ce chemin de
+    :func:`generate_for` : il n'existe pas d'instant où le serveur annonce une
+    identité qu'aucune autorité ne soutient. Le prix est qu'un déploiement à
+    moitié fait reste sans certificat — un GDS qui démarre alors avec un couple
+    incomplet, et qui le dit.
+
+    Il faut une autorité existante. Son absence est une erreur franche, pas un
+    retour silencieux à l'auto-signé : ce serait faire au lecteur croire qu'il
+    a déployé une autorité quand il a des certificats constructeur.
+    """
+    authority = CA_KEY if CA_KEY.is_file() else None
+    if authority is None:
+        logger.error(
+            f"Aucune autorité de certification à {CA_KEY}.\n"
+            f"Pour des certificats signés : python tools/authority.py init\n"
+            f"Pour des certificats constructeurs (amorçage §7.1) :\n"
+            f"  python tools/bootstrap_certificates.py"
+        )
+        return None
+
+    cert_path = role.directory / "server_certificate.pem"
+    key_path = role.directory / "server_private_key.pem"
+    csr_path = role.directory / "server_certificate.csr"
+    if cert_path.exists() and key_path.exists() and not force:
+        public = install_public_copy(cert_path, role)
+        logger.info(
+            f"{role.name} : certificat deja present, conserve "
+            f"({cert_path}) — ancre reinstallee dans {public}"
+        )
+        return None
+    if force and (cert_path.exists() or key_path.exists()):
+        logger.warning(
+            f"{role.name} : --force ecrase le certificat existant. Toute liste de "
+            f"confiance et tout canal securise deja etabli avec cette cle "
+            f"deviendront invalides."
+        )
+
+    primary = hostnames[0] if hostnames else role.name
+    key_path, csr_path = generate_csr(
+        hostname=primary,
+        output_dir=str(role.directory),
+        key_size=key_size,
+        application_uri=role.application_uri,
+    )
+
+    # L'outillage de l'authorite est appele en tant que module plutot que
+    # dans un sous-processus : la cle doit rester en memoire le temps de la
+    # signature et ne jamais se retrouver sur une ligne de commande, visible
+    # dans l'historique du shell et dans la liste des processus.
+    from authority import cmd_sign
+
+    class _Args:
+        csr = str(csr_path)
+        out = str(cert_path)
+        days = validity_days
+
+    cmd_sign(_Args())
+    if not cert_path.is_file():
+        logger.error(f"{role.name} : l'autorite n'a pas produit de certificat.")
+        return None
+
+    certificate = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    issues = profile_issues(certificate)
+    if issues:
+        for issue in issues:
+            logger.error(f"{role.name} : PROFIL NON CONFORME — {issue}")
+    if certificate.issuer == certificate.subject:
+        logger.error(
+            f"{role.name} : le certificat produit est AUTO-SIGNE, alors qu'une "
+            f"signature d'autorite etait demandee. L'ancre qu'on vient de deposer "
+            f"ne prouvera rien."
+        )
+    public = install_public_copy(cert_path, role)
+    logger.info(
+        f"{role.name} : {role.description}\n"
+        f"    URI d'application : {role.application_uri}\n"
+        f"    certificat         : {cert_path}\n"
+        f"    clé privée         : {key_path} (0600)\n"
+        f"    demande signée     : {csr_path}\n"
+        f"    émetteur           : {certificate.issuer.rfc4514_string()}\n"
+        f"    copie publique     : {public}"
+        + f"\n    profil Table 50    : {'conforme' if not issues else str(len(issues)) + ' écart(s)'}"
+    )
+    return cert_path, key_path
+
+
 def generate_for(
     role: Role,
     hostnames: list[str],
@@ -166,9 +274,15 @@ def generate_for(
     cert_path = role.directory / "server_certificate.pem"
     key_path = role.directory / "server_private_key.pem"
     if cert_path.exists() and key_path.exists() and not force:
+        # Le couple existe, mais l'ancre est une copie distincte : un
+        # répertoire pki/ effacé, un déploiement repris chez un tiers, un
+        # `--csr` qui a remplacé le certificat — autant de cas où le couple
+        # est là et l'ancre non. Réinstaller l'ancre est alors la seule action
+        # utile, et elle est sans risque : la copie est le même contenu.
+        public = install_public_copy(cert_path, role)
         logger.info(
             f"{role.name} : certificat deja present, conserve "
-            f"({cert_path})"
+            f"({cert_path}) — ancre reinstallee dans {public}"
         )
         return None
     if force and (cert_path.exists() or key_path.exists()):
@@ -238,6 +352,15 @@ def parse_args(argv: list[str] | None = None):
         help="duree de validite (defaut 365)",
     )
     parser.add_argument(
+        "--signed",
+        action="store_true",
+        help=(
+            "Produit des certificats SIGNES par l'autorite (tools/authority.py) "
+            "au lieu de certificats constructeurs auto-signes. C'est le chemin "
+            "d'un deploiement a autorite ; le defaut reste l'amorcage §7.1."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -270,9 +393,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    issuer = issue_for if args.signed else generate_for
+    if args.signed and not CA_KEY.is_file():
+        # Erreur franche, pas un repli silencieux : une autorité absente ne doit
+        # pas produire quatre auto-signes en faisant croire a un deploiement a
+        # autorite. Le repli est exactement le piege qu'on veut eviter ici.
+        logger.error(
+            f"Certificats signes demandes, mais aucune autorite a {CA_KEY}.\n"
+            f"  creez-la : python tools/authority.py init"
+        )
+        return 2
+
     created = 0
     for role in ROLES:
-        if generate_for(
+        if issuer(
             role,
             hosts.get(role.name, []),
             args.key_size,
@@ -287,12 +421,18 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Ancre de confiance a declarer dans gds/gds_config.yaml :")
     logger.info("  certificates:")
     logger.info(f"    trusted_certificates: [ {TRUSTED_DIR.as_posix()} ]")
-    logger.info(
-        f"    trusted_certificates_group: DefaultApplicationGroup"
-    )
+    logger.info(f"    trusted_certificates_group: DefaultApplicationGroup")
+    if args.signed:
+        logger.info("    issuer_certificates: [ pki/ca ]")
+        logger.info("    issuer_crls: [ pki/crl ]")
+        logger.info("")
+        logger.info("Sans CRL, l'etat de revocation des certificats signes est")
+        logger.info("INCONNU et le defaut ferme de §7.8.2.10 les refuse tous.")
+        logger.info("Emettez-la : python tools/authority.py crl")
     logger.info("")
+    kind = "signes" if args.signed else "constructeurs"
     logger.info(
-        f"{created} couple(s) cree(s) sur {len(ROLES)} ; "
+        f"{created} couple(s) {kind} sur {len(ROLES)} ; "
         f"{len(list(TRUSTED_DIR.glob('*.pem')))} ancre(s) dans {TRUSTED_DIR}"
     )
     if created == 0:
@@ -300,6 +440,11 @@ def main(argv: list[str] | None = None) -> int:
             "Aucun couple cree : tout existait deja. Relancer avec --force pour "
             "renouveler, en sachant que cela invalide la confiance en cours."
         )
+    if args.signed:
+        logger.info("")
+        logger.info("Apres bascule, les ancres constructeurs ne servent plus a rien.")
+        logger.info("Pour les retirer : python tools/authority.py retire lds gds "
+                    "thermo-plc protect-plc")
     return 0
 
 

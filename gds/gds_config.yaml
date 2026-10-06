@@ -113,6 +113,29 @@ certificates:
   # ne doivent pas l'etre.
   trusted_certificates_group: DefaultApplicationGroup
 
+  # AUTORITE DE CERTIFICATION du deploiement. Hors bande aussi : la Part 12 ne
+  # definit aucun mecanisme en bande pour la confiance, et le GDS ne peut pas
+  # etre une autorite (aucun role de ce type dans le NodeIds officiel).
+  # L'outillage est tools/authority.py, dont la cle privee vit HORS du depot.
+  #
+  # Le certificat de l'autorite est un ISSUER, pas un certificat de confiance :
+  # il authentifie ce qui a signe, pas l'application. Le placer dans
+  # trusted_certificates le ferait aussi, et plus permissivement — il vaudrait
+  # validation directe de tout certificat qu'il a signe.
+  #
+  # issuer_crls n'est pas une precaution : sans CRL de l'emetteur, l'etat de
+  # revocation est INCONNU, et le defaut ferme de §7.8.2.10 refuse — un refus
+  # correct, mais sans issue. Les deux declarations vont donc ensemble, ou pas.
+  #
+  # Une CRL n'est appliquee que si sa signature se verifie avec la cle de
+  # l'emetteur de confiance. Une CRL portant le bon nom d'emetteur mais signee
+  # par une autre cle est IGNOREE : elle ne peut ni revoquer (elle ne prouve
+  # rien) ni blanchir (les revocations sont une union, pas une intersection).
+  issuer_certificates:
+    - pki/ca
+  issuer_crls:
+    - pki/crl
+
 audit:
   # Evenements d'audit OPC UA (Part 12 7.8.2.13 et 7.10.27). Un client abonne
   # recoit TrustListUpdatedAuditEventType quand la liste de confiance change, et

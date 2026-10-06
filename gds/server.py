@@ -32,7 +32,11 @@ from .certificategroup import (
 from .certstore import CertificateStore
 from .config import GDSConfig
 from .serverconfiguration import ServerConfigurationNode
-from .trustlist import CertificateGroup, load_trusted_certificates
+from .trustlist import (
+    CertificateGroup,
+    load_issuer_crls,
+    load_trusted_certificates,
+)
 
 
 class GlobalDiscoveryServer(DiscoveryServer):
@@ -124,10 +128,13 @@ class GlobalDiscoveryServer(DiscoveryServer):
         fonction accepterait silencieusement des présentations qui ne
         devraient pas l'être.
         """
-        anchors = self.config.certificates.trusted_certificates
-        if not anchors:
+        certificates = self.config.certificates
+        anchors = certificates.trusted_certificates
+        issuers_declared = certificates.issuer_certificates
+        crls_declared = certificates.issuer_crls
+        if not (anchors or issuers_declared or crls_declared):
             return
-        target = self.config.certificates.trusted_certificates_group
+        target = certificates.trusted_certificates_group
         node = self.certificate_groups.get(target)
         if node is None:
             logger.error(
@@ -141,7 +148,17 @@ class GlobalDiscoveryServer(DiscoveryServer):
             )
             return
         loaded = load_trusted_certificates(node.group, anchors)
-        if not loaded:
+
+        # Meme regle, deux autres listes : l'autorite et sa CRL sont hors bande
+        # au meme titre que les ancres. Aucune des deux ne passe par la
+        # validation, pour la meme raison qu'elles : ce sont des pieces de
+        # contexte de confiance, pas des certificats presentes par le reseau.
+        issuers = load_trusted_certificates(
+            node.group, certificates.issuer_certificates, is_trusted=False
+        )
+        crls = load_issuer_crls(node.group, crls_declared)
+
+        if anchors and not loaded:
             logger.error(
                 f"Aucun ancrage de confiance n'a pu être chargé depuis "
                 f"{len(anchors)} source(s) déclarée(s). Le GDS démarrera avec une "
@@ -150,13 +167,41 @@ class GlobalDiscoveryServer(DiscoveryServer):
                 f"vide, mais ici c'est presque certainement une erreur de "
                 f"déploiement."
             )
-        else:
-            logger.info(
-                f"Ancrages de confiance chargés dans {target!r} : "
-                f"{len(node.group.trusted_certificates)} certificat(s) de "
-                f"confiance, {len(node.group.issuer_certificates)} émetteur(s). "
-                f"Sources : {', '.join(loaded)}"
+
+        if issuers_declared and not issuers:
+            logger.error(
+                f"Aucune autorité de certification n'a pu être chargée depuis "
+                f"{len(issuers_declared)} source(s) déclarée(s). Tout certificat "
+                f"signé par une autorité sera refusé : sa chaîne ne remontera "
+                f"à aucun certificat de confiance."
             )
+
+        # Une autorité sans CRL est le cas qui mérite le plus un avertissement,
+        # parce que son symptôme est un refus partout et nulle part ailleurs :
+        # la validation des autres listes passe, et rien n'indique la cause.
+        if issuers and not crls:
+            logger.warning(
+                f"{len(issuers)} autorité(s) de certification chargée(s) mais "
+                f"AUCUNE CRL. L'état de révocation des certificats qu'elles ont "
+                f"signés sera INCONNU, et le défaut fermé de §7.8.2.10 les "
+                f"refusera tous. Ce refus est correct — mais il n'a pas d'issue "
+                f"tant que la CRL n'est pas distribuée. Déclarez "
+                f"certificates.issuer_crls, ou posez "
+                f"SuppressRevocationStatusUnknown si votre déploiement ne "
+                f"diffuse volontairement pas de CRL."
+            )
+
+        logger.info(
+            f"Contexte de confiance chargé dans {target!r} : "
+            f"{len(node.group.trusted_certificates)} certificat(s) de confiance, "
+            f"{len(node.group.issuer_certificates)} émetteur(s), "
+            f"{len(node.group.issuer_crls)} CRL(s)"
+            + (
+                f" | ancres : {', '.join(loaded)}" if loaded else ""
+            )
+            + (f" | émetteurs : {', '.join(issuers)}" if issuers else "")
+            + (f" | CRL : {', '.join(crls)}" if crls else "")
+        )
 
     def certificate_group(self, name: str) -> Optional[CertificateGroup]:
         """Retourne la liste de confiance d'un groupe, ou ``None``."""

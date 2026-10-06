@@ -104,6 +104,10 @@ l'étape 1 : il n'y a pas de circularité. La CA n'entre qu'à l'étape 4.
 Le certificat constructeur **est** l'ancre. Il n'a pas à être remplacé pour
 devenir inutile — il est ce à quoi l'on fait confiance au départ.
 
+Avec une autorité en service, la séquence change de nature : les ancres
+auto-signées cèdent la place à des certificats signés. Voir la section
+[Autorité de certification](#autorité-de-certification-phases-0-et-1) plus bas.
+
 ### Mise en œuvre
 
 ```bash
@@ -139,21 +143,70 @@ Un ancrage visant un groupe non rattaché est signalé et **ignoré, jamais
 redirigé** : placé dans le mauvais groupe, il accepterait des présentations qui
 ne doivent pas l'être.
 
+## Autorité de certification (phases 0 et 1)
+
+L'amorçage §7.1 ci-dessus pose des **ancres auto-signées** : c'est le minimum
+qui rend un déploiement joignable, et c'est exactement ce qu'un certificat
+constructeur est. Dès qu'une autorité existe, les rôles portent des
+certificats **signés**, et le mode de validation change de nature : la chaîne
+remonte à un `issuer_certificates`, et non plus au certificat lui-même.
+
+| | Amorçage seul | Avec autorité |
+|---|---|---|
+| Le certificat est validé par | lui-même (ancre) | sa chaîne jusqu'à l'autorité |
+| `trusted_certificates` | les 4 ancres | (éventuellement vide) |
+| `issuer_certificates` | — | le certificat de l'autorité |
+| `issuer_crls` | — | **obligatoire**, sans quoi tout est refusé |
+
+L'autorité est **hors ligne** et sa clé **hors du dépôt** (`tools/authority.py`).
+Le GDS ne peut pas être une autorité : la Part 12 ne lui donne pas ce rôle, et la
+recherche sur `CertificateAuthorit` dans le `NodeIds.csv` officiel ne rend
+**aucun** nœud.
+
+Une CRL n'est pas facultative dès qu'une autorité est déclarée. Sans elle,
+l'état de révocation d'un certificat signé est **inconnu**, et le défaut fermé
+de §7.8.2.10 le refuse — un refus correct, mais sans issue. C'est pourquoi
+`issuer_certificates` et `issuer_crls` se déclarent ensemble, et pourquoi le GDS
+avertit explicitement quand il a des émetteurs sans aucune CRL.
+
+Une CRL n'est appliquée que si **sa signature se vérifie avec la clé de
+l'émetteur de confiance**, et pas seulement si son nom d'émetteur correspond.
+Avant cette correction, une CRL au bon nom mais signée par une autre clé était
+appliquée : quiconque pouvait écrire dans `issuer_crls` révoquait tout le
+déploiement. Une CRL non signée par son émetteur ne peut plus ni révoquer (elle
+ne prouve rien) ni blanchir (les révocations sont une **union**, pas une
+intersection).
+
 ### Ce que le canal sécurisé ne garantit pas
 
-asyncua **ne valide pas la chaîne du certificat** côté client.
-`security_policies.py` ne fait que `verify(data, signature)` — prouver la
-possession de la clé privée. Il n'y a ni `validate_cert`, ni liste de
-confiance.
+asyncua ne valide **rien** par lui-même : `security_policies.py` ne fait que
+`verify(data, signature)`, qui prouve la possession de la clé privée. Il n'y a
+ni `validate_cert`, ni liste de confiance dans la pile.
+
+Mais la pile **expose le point de branchement**, des deux côtés :
+
+| Côté | Point d'entrée | Quand |
+|---|---|---|
+| Serveur | `Server.set_certificate_validator(...)` | à la création de session, sur le certificat client présenté |
+| Client | `Client.certificate_validator` (attribut) | à l'ouverture du canal, sur le certificat serveur reçu |
+
+C'est une correction d'un diagnostic antérieur, qui concluait « asyncua ne le
+permet pas ». La réalité est plus petite et plus utile : **personne n'y a
+branché de validateur**. Tout le travail consiste à y brancher le nôtre.
+
+Une limite structurelle reste : à l'ouverture du canal, asyncua **tronque la
+chaîne** et ne conserve que la feuille. Le client ne voit donc jamais l'autorité
+en transit — il doit l'apprendre par la liste de confiance du GDS, ce qui est la
+conception voulue.
 
 Conséquence, à connaître avant de dire « le déploiement est sécurisé » :
 
 - `SignAndEncrypt` est **réel** : chiffrement et authentification des messages.
-- L'**identité** n'est pas vérifiée. Un attaquant détenant son propre couple de
-  clés serait accepté.
+- Tant qu'aucun validateur n'est branché, l'**identité** n'est pas vérifiée. Un
+  attaquant détenant son propre couple de clés serait accepté.
 
-La validation d'identité doit venir du code du projet. Le GDS sait déjà le
-faire ; c'est le côté client qui reste à écrire.
+Le GDS sait déjà valider côté serveur ; c'est le côté client qui reste à câbler,
+et c'est le sens de `set_certificate_validator` / `Client.certificate_validator`.
 
 ## Global Discovery Server — couche certificats, non exposée
 

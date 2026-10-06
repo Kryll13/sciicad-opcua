@@ -97,6 +97,34 @@ class CertificatesConfig(BaseModel):
     #: HTTPS rendrait la liste incohérente avec son propre ``CertificateTypes``.
     trusted_certificates_group: str = "DefaultApplicationGroup"
 
+    #: Autorités de certification des certificats amorcés ci-dessus.
+    #:
+    #: C'est la seconde moitié du déploiement à autorité, et elle n'est pas
+    #: facultative : sans elle, un certificat d'application doit être signé par
+    #: un certificat de confiance du groupe — donc auto-signé. La Part 12
+    #: décrit les deux configurations, mais dès qu'une autorité existe, elle se
+    #: déclare ici.
+    #:
+    #: Le certificat de l'autorité n'est **pas** un certificat de confiance :
+    #: il n'authentifie pas une application, il authentifie ce qui a signé une
+    #: application. Le mettre dans ``trusted_certificates`` le ferait aussi, ce
+    #: qui est plus permissif que nécessaire — il vaudrait validation directe de
+    #: tout certificat qu'il a signé.
+    issuer_certificates: list[str] = Field(default_factory=list)
+
+    #: Listes de révocation des autorités ci-dessus.
+    #:
+    #: Leur présence n'est pas décorative : le défaut fermé de §7.8.2.10 refuse
+    #: un certificat dont l'état de révocation est **inconnu**, et il est
+    #: inconnu précisément en l'absence de CRL de l'émetteur. Déclarer une
+    #: autorité sans sa CRL rend donc tous les certificats qu'elle a signés
+    #: refusés — un refus correct, mais sans issue.
+    #:
+    #: Une CRL est **consultée par émetteur** : seules celles signées par
+    #: l'autorité du certificat présenté sont appliquées. Une CRL sans
+    #: signature correspondante est ignorée, avec un avertissement.
+    issuer_crls: list[str] = Field(default_factory=list)
+
 
 class AuditConfig(BaseModel):
     """Événements d'audit OPC UA, Part 12 §7.8.2.13 et §7.10.27.

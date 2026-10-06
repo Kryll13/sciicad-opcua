@@ -121,6 +121,107 @@ def thumbprint(der: bytes) -> str:
 _CERTIFICATE_SUFFIXES = (".pem", ".der", ".crt", ".cer")
 
 
+def load_issuer_crls(group: "CertificateGroup", paths: list[str]) -> list[str]:
+    """Charge des CRL dans ``group.issuer_crls``, hors bande.
+
+    Symétrique de :func:`load_trusted_certificates`, et soumis à la même
+    question de périmètre : la CRL est une **pièce de contexte de confiance**.
+    Elle entre sans passer la validation de :mod:`gds.certstore`, qui porte sur
+    les certificats présentés, non sur les pièces de contexte que l'on distribue.
+
+    Ce qui change par rapport au chargeur de certificats : la signature de la
+    CRL est vérifiée contre la clé du certificat d'émetteur au moment de la
+    **consultation**, pas du dépôt. C'est la seule défense possible, et c'est
+    celle qui compte : une CRL peut être émise par une autorité à un instant
+    où sa clé est légitime, et son authenticityité au moment de l'usage ne peut
+    pas être celle de son dépôt. Une CRL hors signature est donc acceptée au
+    dépôt puis ignorée à la consultation, avec un avertissement qui nomme
+    l'émetteur — pas appliquée.
+
+    Un PEM peut contenir une ou plusieurs CRL enchaînées ; chacune est
+    conservée. Une CRL est un DER singleton : il n'y a pas d'y fractionner, et
+    un fichier multi-CRL est traité comme une entrée par bloc.
+    """
+    loaded: list[str] = []
+    files = _expand(paths, (".pem", ".der", ".crl", ".crt"))
+    for path in files:
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            logger.warning(f"CRL illisible, ignorée : {path} ({exc})")
+            continue
+        blocks = _split_crls(payload)
+        if not blocks:
+            logger.warning(
+                f"Aucune CRL exploitable dans {path} : ce n'est ni un PEM de "
+                f"CRL ni un DER de CRL. Ignorée."
+            )
+            continue
+        added = 0
+        for der in blocks:
+            try:
+                if group.add_crl(der):
+                    added += 1
+            except TrustListError as exc:
+                logger.warning(f"CRL refusée dans {path} : {exc}")
+        if added:
+            loaded.append(str(path))
+            logger.info(f"{added} CRL(s) chargée(s) depuis {path}")
+    return loaded
+
+
+def _split_crls(payload: bytes) -> list[bytes]:
+    """Blocs CRL DER contenus dans un PEM enchaîné ou un DER unique."""
+    try:
+        x509.load_der_x509_crl(payload)
+        return [payload]
+    except Exception:
+        pass
+    blocks: list[x509.CertificateRevocationList] = []
+    marker = b"-----BEGIN X509 CRL-----"
+    end = b"-----END X509 CRL-----"
+    remainder = payload
+    while marker in remainder:
+        _, _, remainder = remainder.partition(marker)
+        body, found, remainder = remainder.partition(end)
+        if not found:
+            break
+        try:
+            blocks.append(x509.load_pem_x509_crl(marker + body + end))
+        except Exception:
+            logger.warning("Bloc PEM illisible dans une CRL")
+            continue
+    # Le décodeur rend des objets CRL ; la liste de confiance stocke des DER.
+    # La conversion se fait ici, à la frontière, plutôt que dans l'appelant
+    # qui n'a aucune raison de connaître la forme interne.
+    return [
+        crl.public_bytes(serialization.Encoding.DER)
+        for crl in blocks
+    ]
+
+
+def _expand(paths: list[str], suffixes: tuple[str, ...]) -> list[Path]:
+    """Développe une liste de chemins en fichiers existants.
+
+    Un chemin absent est un avertissement, jamais une erreur : une ancre qui
+    manque doit se voir dans le journal sans empêcher un serveur de démarrer.
+    """
+    files: list[Path] = []
+    for raw in paths:
+        candidate = Path(raw)
+        if candidate.is_dir():
+            files += sorted(
+                entry
+                for entry in candidate.iterdir()
+                if entry.is_file() and entry.suffix.lower() in suffixes
+            )
+        elif candidate.is_file():
+            files.append(candidate)
+        else:
+            logger.warning(f"Source de confiance introuvable, ignorée : {raw!r}")
+    return files
+
+
 def _split_certificates(payload: bytes) -> list[bytes]:
     """Certificats DER contenus dans un PEM enchaîné ou un DER unique.
 
@@ -195,27 +296,12 @@ def load_trusted_certificates(
     l'inexistant, l'illisible et l'incompatible. Un fichier illisible est
     **avertissement et non erreur** : une ancre absente doit se voir dans le
     journal, pas empêcher un serveur de démarrer — sauf si l'administrateur
-    действиait d'elle, auquel cas le silence serait pire. C'est pourquoi le
+    dépendait d'elle, auquel cas le silence serait pire. C'est pourquoi le
     chemin d'erreur est explicite dans la valeur rendue.
     """
     loaded: list[str] = []
     wanted = is_trusted
-    files: list[Path] = []
-    for raw in paths:
-        candidate = Path(raw)
-        if candidate.is_dir():
-            files += sorted(
-                entry
-                for entry in candidate.iterdir()
-                if entry.is_file()
-                and entry.suffix.lower() in _CERTIFICATE_SUFFIXES
-            )
-        elif candidate.is_file():
-            files.append(candidate)
-        else:
-            logger.warning(
-                f"Certificat de confiance introuvable, ignoré : {raw!r}"
-            )
+    files = _expand(paths, _CERTIFICATE_SUFFIXES)
 
     for path in files:
         try:
@@ -382,6 +468,21 @@ class CertificateGroup:
 
     # -- contenu ----------------------------------------------------------
 
+    def _bucket(self, name: str) -> list[bytes]:
+        """La liste nommée par ``name``, qui doit être l'une des cinq.
+
+        Le routage était dupliqué dans ``add``, ``remove`` et ``contains`` ;
+        l'ajouter comme liste d'arguments possibles le rendrait faux au
+        troisième appel. Le membre est vérifié ici une fois pour toutes, et
+        ``LIST_FIELDS`` fait autorité : une cinquième liste normative y
+       apparaîtrait automatiquement, sans qu'une liste codée en dur décide à la place
+        de la norme de ce qui existe.
+        """
+        bucket = getattr(self, name, None)
+        if not isinstance(bucket, list) or name not in LIST_FIELDS:
+            raise TrustListError(f"liste de confiance inconnue : {name!r}")
+        return bucket
+
     def add(self, certificate: bytes, is_trusted: bool = True) -> bool:
         """Ajoute un certificat DER. Retourne ``True`` s'il était absent.
 
@@ -391,17 +492,54 @@ class CertificateGroup:
         if not certificate:
             raise TrustListError("certificat vide")
         name = "trusted_certificates" if is_trusted else "issuer_certificates"
-        current = getattr(self, name)
+        current = self._bucket(name)
         if any(thumbprint(item) == thumbprint(certificate) for item in current):
             return False
         current.append(certificate)
         self.last_update_time = datetime.now(timezone.utc)
         return True
 
+    def add_crl(self, crl: bytes) -> bool:
+        """Ajoute une CRL DER à ``issuer_crls``.
+
+        Équivalent en mémoire de ce que fait ``Write`` pour un client autorisé
+        à diffuser des CRL, et il n'existait aucun chemin hors bande pour cela.
+        Les tests existants atteignaient la liste par attribut, ce qui est
+        précisément le genre d'accès qui masque une liste non câblée.
+
+        La CRL est **parcourue** avant d'être acceptée. Un certificat glissé
+        ici serait accepté puis silencieusement ignoré à la consultation, avec
+        un journal qui dirait « CRL illisible » sans dire d'où elle vient ; le
+        refuser à l'entrée nomme le fichier fautif.
+        """
+        if not crl:
+            raise TrustListError("CRL vide")
+        try:
+            x509.load_der_x509_crl(crl)
+        except Exception as exc:
+            raise TrustListError(f"contenu illisible en CRL DER : {exc}") from exc
+        current = self._bucket("issuer_crls")
+        if any(thumbprint(item) == thumbprint(crl) for item in current):
+            return False
+        current.append(crl)
+        self.last_update_time = datetime.now(timezone.utc)
+        return True
+
     def remove(self, thumb: str, is_trusted: bool = True) -> bool:
         """Retire un certificat par empreinte. Retourne ``True`` s'il existait."""
         name = "trusted_certificates" if is_trusted else "issuer_certificates"
-        current = getattr(self, name)
+        current = self._bucket(name)
+        wanted = thumb.strip().lower()
+        for index, item in enumerate(current):
+            if thumbprint(item) == wanted:
+                del current[index]
+                self.last_update_time = datetime.now(timezone.utc)
+                return True
+        return False
+
+    def remove_crl(self, thumb: str) -> bool:
+        """Retire une CRL par empreinte. Retourne ``True`` si elle existait."""
+        current = self._bucket("issuer_crls")
         wanted = thumb.strip().lower()
         for index, item in enumerate(current):
             if thumbprint(item) == wanted:
@@ -413,7 +551,11 @@ class CertificateGroup:
     def contains(self, certificate: bytes, is_trusted: bool = True) -> bool:
         name = "trusted_certificates" if is_trusted else "issuer_certificates"
         wanted = thumbprint(certificate)
-        return any(thumbprint(item) == wanted for item in getattr(self, name))
+        return any(thumbprint(item) == wanted for item in self._bucket(name))
+
+    def contains_crl(self, crl: bytes) -> bool:
+        wanted = thumbprint(crl)
+        return any(thumbprint(item) == wanted for item in self._bucket("issuer_crls"))
 
     def count(self, masks: int = ua.TrustListMasks.All) -> int:
         return sum(len(v) for v in self.lists(masks).values())

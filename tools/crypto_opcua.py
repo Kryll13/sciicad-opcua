@@ -153,6 +153,65 @@ def generate(
     return cert_path, key_path
 
 
+def generate_csr(
+    hostname: str,
+    output_dir: str = ".",
+    key_size: int = 2048,
+    application_uri: str = "",
+):
+    """Génère une clé privée et la demande de signature correspondante.
+
+    La clé **reste ici** : elle n'est jamais confiée à l'autorité. C'est le
+    sens de ``CreateSigningRequest`` (§7.10.4), dont cette fonction est
+    l'équivalent hors bande pour une application que le GDS ne gère pas. La clé
+    ne voyage que dans la demande, et la demande ne prouve que la possession.
+
+    Ce qui change par rapport à :func:`generate` : aucun certificat n'est
+    produit. Il n'y a donc pas de ``server_certificate.pem`` écrit, et c'est
+    voulu — écrire un auto-signé pour le remplacer ensuite ferait subsister un
+    instant où le serveur annonce une identité qu'aucune autorité ne soutient.
+
+    Retourne ``(chemin_cle, chemin_demande)``.
+    """
+    if not application_uri:
+        raise ValueError(
+            "une demande de signature exige l'URI d'application : c'est elle "
+            "que le certificat portera dans son SAN, et elle ne se devine pas"
+        )
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    subject = build_names(hostname, application_uri)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    request = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(subject)
+        .add_extension(
+            # Le SAN voyage dans la demande et n'est pas posé par l'autorité :
+            # une autorité qui réécrirait l'identité de celui qu'elle certifie
+            # certifierait autre chose que ce qui a été demandé.
+            x509.SubjectAlternativeName(build_san(hostname, application_uri)),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+
+    key_path = directory / "server_private_key.pem"
+    csr_path = directory / "server_certificate.csr"
+
+    key_path.touch(mode=0o600, exist_ok=True)
+    key_path.chmod(0o600)
+    key_path.write_bytes(
+        private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    csr_path.write_bytes(request.public_bytes(serialization.Encoding.PEM))
+    return key_path, csr_path
+
+
 def parse_args(argv=None):
     """Analyse les arguments de la ligne de commande."""
     parser = argparse.ArgumentParser(
@@ -178,6 +237,15 @@ def parse_args(argv=None):
         "--application-uri", default="",
         help="URI d'application inscrite dans le SAN (ex : urn:SCIICAD:thermo-plc)",
     )
+    parser.add_argument(
+        "--csr", action="store_true",
+        help=(
+            "Produire une demande de signature au lieu d'un certificat. La clé "
+            "privée reste locale et aucun certificat n'est écrit : "
+            "l'autorité signe ensuite la demande. C'est le chemin d'un "
+            "déploiement à autorité de certification."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -194,6 +262,34 @@ def main(argv=None) -> int:
     if args.validity_days <= 0:
         logger.error(f"--validity-days doit être positif : {args.validity_days}")
         return 2
+
+    if args.csr:
+        if args.validity_days <= 0:
+            logger.error(
+                f"--validity-days doit être positif : {args.validity_days}"
+            )
+            return 2
+        if not args.application_uri:
+            logger.error(
+                "--csr exige --application-uri : c'est elle que le certificat "
+                "portera dans son SAN, et elle ne se devine pas."
+            )
+            return 2
+        key_path, csr_path = generate_csr(
+            hostname=args.hostname,
+            output_dir=args.output_dir,
+            key_size=args.key_size,
+            application_uri=args.application_uri,
+        )
+        logger.info(banner("Demande de signature générée", 50))
+        logger.info(f"  Clé privée  : {key_path} (non chiffrée, permissions 0600)")
+        logger.info(f"  Demande     : {csr_path}")
+        logger.info(f"  URI appli.  : {args.application_uri}")
+        logger.info("")
+        logger.info("La clé n'est sortie de cette machine à aucun moment. Signez la")
+        logger.info("demande hors ligne, puis placez le certificat à sa place :")
+        logger.info(f"  python tools/authority.py sign {csr_path}")
+        return 0
 
     cert_path, key_path = generate(
         hostname=args.hostname,

@@ -197,6 +197,91 @@ Rappelle enfin la déclaration à porter dans `gds/gds_config.yaml`. Voir
 [docs/securite.md](securite.md#amorçage-de-la-confiance-part-12-71) pour la
 raison normative.
 
+Avec `--signed`, la même commande produit des certificats **signés par
+l'autorité** : la clé privée est générée localement, seule une demande de
+signature sort, et l'autorité écrit le certificat à sa place.
+
+```bash
+python tools/authority.py init          # l'autorité, d'abord
+python tools/bootstrap_certificates.py --signed --force
+python tools/authority.py crl           # la CRL de l'autorité
+```
+
+L'absence d'autorité est une **erreur franche**, code de sortie 2, jamais un
+retour silencieux aux auto-signés : ce repli ferait croire à un déploiement à
+autorité là où il n'y a que des certificats constructeur.
+
+### `authority.py` — autorité de certification hors ligne
+
+Quatre sous-commandes. L'outil ne dessert aucun client et n'est jamais exposé
+par le GDS : c'est l'extérieur dont la Part 12 admet qu'il existe.
+
+| Commande | Effet |
+|---|---|
+| `init` | Crée l'autorité. Clé **hors du dépôt**, dans `~/.sciicad/ca/`, en `0600`. |
+| `sign CSR` | Signe une demande PKCS #10. `--out`, `--days`. |
+| `crl` | Émet une CRL. `--revoke SERIE` (hexadécimal, répétable), `--days`. |
+| `retire ROLE...` | Archive les clés constructeurs, rappelle de retirer les ancres. |
+
+```bash
+python tools/authority.py init --common-name "SCIICAD CA"
+python tools/authority.py sign thermo-plc/server_certificate.csr
+python tools/authority.py crl --revoke 1a2b3c4d5e
+python tools/authority.py retire lds gds thermo-plc protect-plc
+```
+
+**Où vit la clé, et pourquoi c'est le point important.** Elle est dans le
+`$HOME` de l'opérateur, jamais dans l'arbre du dépôt : une clé de signature au
+besoin du code devient un geste banal, et une clé qu'on signe sans réfléchir est
+une clé compromise sans incident. Seul le certificat public est dans `pki/ca/`,
+et `pki/` est ignoré par git.
+
+Le profil : `cA=TRUE` avec `pathLength=0`, `keyCertSign` et `cRLSign`, sans EKU
+ni SAN. Une autorité ne sert aucun protocole applicatif, et lui en donner un
+invite à la présenter comme si elle pouvait ouvrir un canal. `pathLength=0`
+interdit une sous-autorité : une hiérarchie à un niveau se audite en entier,
+alors qu'une autorité capable d'en créer une autre peut en créer une qu'on ne
+verra jamais.
+
+`sign` refuse une demande dont la signature ne tient pas, une demande sans URI
+d'application, et une demande portant deux URI — la Table 50 en impose
+exactement un, et deux sont deux identités qui se contestent. Il vérifie aussi
+que la clé correspond au certificat : sans cela, on émet des certificats dont
+la signature ne remonte à rien de vérifiable, ce qui ne se découvre qu'au
+premier rejet.
+
+`retire` archive les clés constructeurs dans `pki/retired/` plutôt que de les
+supprimer : un déploiement doit pouvoir revenir en arrière, et une clé effacée
+est un retour en arrière impossible.
+
+### `selftest_authority.py` — autorité et certificats signés (phases 0 et 1)
+
+```bash
+python tools/selftest_authority.py
+```
+
+Vérifie que l'autorité existe, qu'elle est conforme (`cA=TRUE`,
+`pathLength=0`, `keyCertSign`, `cRLSign`, pas d'EKU), que **sa clé est hors du
+dépôt** et en `0600`, que les quatre rôles portent un certificat signé et
+conforme au profil, et que le GDS réel charge ancres, autorité et CRL.
+
+**Six contrôles négatifs**, chacun pour un motif distinct, et deux témoins qui
+doivent passer : autorité absente, autorité sans CRL, certificat révoqué, **CRL
+au bon nom d'émetteur mais signée par une autre clé**, profil non conforme, SAN
+à deux URI.
+
+Le quatrième est le plus important, parce qu'il fermait un trou réel : avant,
+une CRL était appliquée sur la seule foi de son nom d'émetteur. Quiconque était
+autorisé à écrire dans `issuer_crls` — donc tout client habilité à diffuser des CRL,
+ce chemin étant le seul normatif — pouvait déposer une CRL portant le nom de
+l'autorité et révoquer **tout** le déploiement. Le test le prouve en réactivant
+le comportement : la CRL étrangère révoque alors le certificat, et
+`selftest_authority.py` échoue.
+
+Une autorité de laboratoire est créée pour ces contrôles. Révoquer le numéro de
+série d'un certificat en service pour tester une CRL serait un test qui casse
+la production.
+
 ## Tests GDS
 
 ### `test_gds.py`
