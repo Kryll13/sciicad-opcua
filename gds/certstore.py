@@ -872,7 +872,7 @@ class CertificateStore:
           conforme. Un profil valide et une chaîne correcte ne suffisent pas :
           il faut que la clé ait été déclarée de confiance. Sans ce troisième
           contrôle, n'importe quel certificat produit par l'autorité — y
-          compris un certificat de test淋 émis puis abandonné — serait accepté
+          compris un certificat de test émis puis abandonné — serait accepté
           pour ouvrir un canal.
 
         Rend le certificat validé, pour que l'appelant puisse journaliser son

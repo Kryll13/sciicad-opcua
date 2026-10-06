@@ -395,15 +395,19 @@ conception voulue.
 Conséquence, à connaître avant de dire « le déploiement est sécurisé » :
 
 - `SignAndEncrypt` est **réel** : chiffrement et authentification des messages.
-- Côté serveur, l'**identité** est vérifiée : le GDS refuse une clé non
-  déclarée de confiance, et le contrôle est testé.
-- Côté client, l'**identité du serveur** n'est pas encore vérifiée. Un client se
-  connecte aujourd'hui sans contrôler le certificat qu'on lui présente. C'est le
-  reste de ce chantier : brancher `Client.certificate_validator` pour lire la
-  liste de confiance du GDS avant d'accepter une session.
+- L'**identité** est vérifiée **dans les deux sens**. Le GDS refuse une clé
+  client non déclarée de confiance. Un client refuse un serveur qui ne présente
+  pas le certificat attendu, ou présente celui d'une autre application.
 
-Autrement dit : un client SCIICAD ne peut pas encore proves qu'il parle au bon
-GDS. La direction du contrôle est donc à sens unique pour l'instant.
+Autrement dit : les deux sens du contrôle sont fermés. Un client SCIICAD ne se
+connecte qu'au GDS qu'il attendait, et le GDS n'accepte que les clients qu'il a
+déclarés.
+
+Ce point est plus facile à mesurer qu'à croire, parce que le chiffrement seul
+donne une garantie qui semble suffisante et ne l'est pas : `SignAndEncrypt`
+prouve que le correspondant détient une clé privée, ce qui empêche l'**écoute**
+mais pas l'**usurpation**. Voir « [Validation côté client
+(phase 3)](#validation-côté-client-phase-3) » et `sciicad/trusted.py`.
 
 ## Global Discovery Server — couche certificats, non exposée
 
@@ -414,11 +418,28 @@ groupes de confiance, audit, et gestion des rôles en base
 (`authenticated_user`, `security_admin`, `configure_admin`, `discovery_admin`,
 `certificate_authority_admin`).
 
-**L'émission de certificats n'est pas encore atteignable.** Les services de
-`gds_server.py` sont déclarés comme nœuds `Method` à NodeIds non normatifs, avec
-des entrées et sorties en `String` : aucun client OPC UA normatif ne les appelle.
-Ce n'est pas une réserve de forme, c'est un fait mesuré — un client standard
-interrogeant ce serveur n'atteint aucun de ces gestionnaires.
+**L'émission de certificats est atteinte par l'interface normative, pas par
+`gds_server.py`.** Deux couches coexistent ici, et la distinction compte :
+
+| Couche | NodeIds | État |
+|---|---|---|
+| `gds/server.py`, `gds/serverconfiguration.py` | normatifs (Part 4/6) | exposée, typée |
+| `gds/gds_server.py` | non normatifs (1003, 1004…) | **inert** |
+
+`gds_server.py` déclare ses gestionnaires en méthodes à NodeIds non normatifs
+avec des entrées et sorties en `String` : aucun client OPC UA normatif ne les
+appelle. C'est un fait mesuré, pas une réserve de forme — un client standard
+interrogeant *ce* serveur n'atteint aucun de ces gestionnaires.
+
+L'émission réelle passe par `ServerConfiguration` : `CreateSigningRequest` (§7.10,
+i=3865) est câblé avec ses types normatifs — `NodeId`, `Boolean`, `ByteString` —
+et `UpdateCertificate` accepte `IssuerCertificates` et `PrivateKeyFormat`. Un
+client normatif atteint donc l'émission par ce chemin.
+
+`gds_server.py` reste en place parce qu'il porte les rôles en base
+(`authenticated_user`, `security_admin`, …) et une partie de la logique
+historique. Il n'est pas callable de l'extérieur ; le dire est plus honnête que
+de le supprimer sans avoir vérifié qui en dépend.
 
 **En revanche, la gestion des listes de confiance est exposée conformément.**
 Elle suit le modèle fichier de la Part 12 §7.8.2, sous les NodeIds normatifs du
